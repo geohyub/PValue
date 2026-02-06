@@ -1,0 +1,20 @@
+{
+  "csv_files": [
+    "data/site_A.csv",
+    "data/site_B.csv",
+    "data/site_C.csv"
+  ],
+  "csv_type": "general",
+  "output_dir": "./batch_outputs",
+  "config": {
+    "tasks": [
+      {
+        "name": "Cable Laying",
+        "duration_h": 72,
+        "thresholds": {"Hs": 1.5, "Wind": 10}
+      }
+    ],
+    "n_sims": 1000,
+    "pvals": [50, 75, 90]
+  }
+}

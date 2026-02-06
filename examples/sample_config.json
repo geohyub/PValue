@@ -1,0 +1,30 @@
+{
+  "tasks": [
+    {
+      "name": "Mobilization",
+      "duration_h": 12,
+      "thresholds": {"Hs": 2.0, "Wind": 12},
+      "setup_h": 2,
+      "teardown_h": 0
+    },
+    {
+      "name": "Installation",
+      "duration_h": 48,
+      "thresholds": {"Hs": 1.5, "Wind": 10},
+      "setup_h": 4,
+      "teardown_h": 2
+    },
+    {
+      "name": "Commissioning",
+      "duration_h": 24,
+      "thresholds": {"Hs": 2.0, "Wind": 15},
+      "setup_h": 0,
+      "teardown_h": 0
+    }
+  ],
+  "n_sims": 1000,
+  "pvals": [50, 75, 90],
+  "split_mode": false,
+  "na_handling": "permissive",
+  "start_month": null
+}
