@@ -18,6 +18,8 @@ from pvalue.gui.tabs import ChartsTab, ConfigTab, DataTab, OptimalMonthTab, Resu
 _STYLESHEET = """
 QMainWindow { background-color: #f5f5f5; }
 QTabWidget::pane { border: 1px solid #ccc; background: white; }
+QTabBar::tab { padding: 8px 16px; }
+QTabBar::tab:disabled { color: #aaa; }
 
 QPushButton#primary {
     background-color: #0066cc; color: white;
@@ -42,6 +44,17 @@ QHeaderView::section {
     background-color: #4472C4; color: white;
     font-weight: bold; padding: 4px; border: none;
 }
+
+QLabel#guide {
+    color: #666; font-style: italic; padding: 20px;
+}
+QLabel#hero {
+    font-size: 18px; font-weight: bold; color: #333; padding: 8px 0;
+}
+QLabel#interpretation {
+    background-color: #f0f7ff; border: 1px solid #d0e3f7;
+    border-radius: 4px; padding: 10px; color: #333;
+}
 """
 
 
@@ -62,7 +75,8 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_tabs()
-        self.statusBar().showMessage("Ready")
+        self._enforce_tab_access()
+        self.statusBar().showMessage("Ready — Start by loading a CSV file in the Data tab")
 
     # ----- Menu bar -----
 
@@ -110,3 +124,32 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.results_tab, "4. Results")
         self.tabs.addTab(self.charts_tab, "5. Charts")
         self.tabs.addTab(self.optimal_tab, "6. Optimal Month")
+
+    # ----- Tab access enforcement -----
+
+    def _enforce_tab_access(self):
+        """Disable tabs that can't be used yet."""
+        # Run tab needs data
+        self.tabs.setTabEnabled(2, False)  # Run
+        self.tabs.setTabEnabled(3, False)  # Results
+        self.tabs.setTabEnabled(4, False)  # Charts
+        self.tabs.setTabEnabled(5, False)  # Optimal Month
+
+        self.tabs.setTabToolTip(2, "Load data first to enable this tab")
+        self.tabs.setTabToolTip(3, "Run a simulation first to see results")
+        self.tabs.setTabToolTip(4, "Run a simulation first to see charts")
+        self.tabs.setTabToolTip(5, "Load data first to enable this tab")
+
+    def unlock_after_data_loaded(self):
+        """Called by DataTab after successful data load."""
+        self.tabs.setTabEnabled(2, True)   # Run
+        self.tabs.setTabEnabled(5, True)   # Optimal Month
+        self.tabs.setTabToolTip(2, "")
+        self.tabs.setTabToolTip(5, "")
+
+    def unlock_after_simulation(self):
+        """Called by RunTab after simulation completes."""
+        self.tabs.setTabEnabled(3, True)   # Results
+        self.tabs.setTabEnabled(4, True)   # Charts
+        self.tabs.setTabToolTip(3, "")
+        self.tabs.setTabToolTip(4, "")

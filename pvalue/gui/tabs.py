@@ -39,6 +39,25 @@ from pvalue.reporting import generate_excel_report
 from pvalue.simulation import summarize_pxx
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _guide(text: str) -> QLabel:
+    """Create a styled guide/hint label."""
+    lbl = QLabel(text)
+    lbl.setObjectName("guide")
+    lbl.setWordWrap(True)
+    return lbl
+
+
+def _section(text: str) -> QLabel:
+    """Create a bold section header."""
+    lbl = QLabel(text)
+    lbl.setObjectName("hero")
+    return lbl
+
+
 # =====================================================================
 # Tab 1 — Data Loading
 # =====================================================================
@@ -54,13 +73,22 @@ class DataTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
+        # --- Welcome banner ---
+        layout.addWidget(_section("Step 1: Load Metocean Data"))
+        layout.addWidget(_guide(
+            "Select a CSV file containing historical wave height (Hs) and wind speed data. "
+            "Supported formats: General CSV (with 'timestamp', 'Hs', 'Wind' columns) "
+            "or ERA5 Hindcast CSV (auto-detected)."
+        ))
+
         # --- File selection ---
         file_group = QGroupBox("CSV File")
         fg = QHBoxLayout(file_group)
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("Select a CSV file...")
+        self.path_edit.setPlaceholderText("Click Browse to select a CSV file...")
         self.path_edit.setReadOnly(True)
         btn_browse = QPushButton("Browse...")
+        btn_browse.setToolTip("Open file dialog to select a metocean CSV")
         btn_browse.clicked.connect(self._browse)
         fg.addWidget(self.path_edit, stretch=1)
         fg.addWidget(btn_browse)
@@ -71,11 +99,16 @@ class DataTab(QWidget):
         opts.addWidget(QLabel("Format:"))
         self.csv_type_combo = QComboBox()
         self.csv_type_combo.addItems(["general", "hindcast"])
+        self.csv_type_combo.setToolTip(
+            "general: Standard CSV with 'timestamp', 'Hs', 'Wind' columns\n"
+            "hindcast: ERA5 format with 5-line header (auto-detected columns)"
+        )
         self.csv_type_combo.currentTextChanged.connect(self._toggle_hindcast)
         opts.addWidget(self.csv_type_combo)
 
         opts.addSpacing(20)
         self.date_check = QCheckBox("Date filter")
+        self.date_check.setToolTip("Filter hindcast data to a specific date range")
         opts.addWidget(self.date_check)
         self.start_date = QLineEdit()
         self.start_date.setPlaceholderText("Start (YYYY-MM-DD)")
@@ -92,8 +125,17 @@ class DataTab(QWidget):
 
         btn_load = QPushButton("Load && Validate")
         btn_load.setObjectName("primary")
+        btn_load.setToolTip("Load the selected CSV and run data quality checks")
         btn_load.clicked.connect(self._load)
         opts.addWidget(btn_load)
+
+        btn_example = QPushButton("Load Example")
+        btn_example.setToolTip(
+            "Load bundled sample metocean data and config\n"
+            "to try the simulator without your own data"
+        )
+        btn_example.clicked.connect(self._load_example)
+        opts.addWidget(btn_example)
         layout.addLayout(opts)
 
         # --- Status ---
@@ -106,6 +148,16 @@ class DataTab(QWidget):
         self.preview.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.preview.setAlternatingRowColors(True)
         layout.addWidget(self.preview, stretch=1)
+
+        # --- CSV format help ---
+        help_label = QLabel(
+            "<b>General CSV example:</b><br>"
+            "<code>timestamp,Hs,Wind<br>"
+            "2020-01-01 00:00:00,1.2,8.5<br>"
+            "2020-01-01 01:00:00,1.3,9.1</code>"
+        )
+        help_label.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+        layout.addWidget(help_label)
 
         self._toggle_hindcast(self.csv_type_combo.currentText())
 
@@ -135,12 +187,21 @@ class DataTab(QWidget):
         try:
             df = load_csv(path, csv_type, sd, ed)
         except Exception as exc:
-            QMessageBox.critical(self, "Load Error", str(exc))
+            QMessageBox.critical(
+                self, "Load Error",
+                f"Failed to load file:\n{exc}\n\n"
+                f"Make sure the file is a valid CSV with the correct format."
+            )
             return
 
         ok, msg = validate_metocean(df)
         if not ok:
-            QMessageBox.critical(self, "Validation Failed", msg)
+            QMessageBox.critical(
+                self, "Validation Failed",
+                f"{msg}\n\n"
+                f"Required: DatetimeIndex + 'Hs' (0-20m) + 'Wind' (0-70m/s) columns, "
+                f"minimum 24 records, less than 50% missing values."
+            )
             return
 
         interval = get_time_interval_minutes(df)
@@ -152,7 +213,68 @@ class DataTab(QWidget):
             f"{df.index.min().date()} to {df.index.max().date()}"
         )
         self._show_preview(df)
-        self.mw.statusBar().showMessage(f"Data loaded: {os.path.basename(path)}")
+        self.mw.unlock_after_data_loaded()
+        self.mw.statusBar().showMessage(
+            f"Data loaded: {os.path.basename(path)} — Go to Tab 2 to configure tasks"
+        )
+
+    def _load_example(self):
+        """Load bundled example data and config."""
+        import sys
+        # Resolve the examples directory relative to the package
+        if getattr(sys, "frozen", False):
+            base = os.path.join(sys._MEIPASS, "examples")
+        else:
+            base = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
+        base = os.path.normpath(base)
+
+        csv_path = os.path.join(base, "sample_metocean.csv")
+        config_path = os.path.join(base, "sample_config.json")
+
+        if not os.path.isfile(csv_path):
+            QMessageBox.warning(self, "Missing", f"Example CSV not found:\n{csv_path}")
+            return
+
+        try:
+            df = load_csv(csv_path, "general")
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to load example CSV:\n{exc}")
+            return
+
+        ok, msg = validate_metocean(df)
+        if not ok:
+            QMessageBox.critical(self, "Validation", msg)
+            return
+
+        interval = get_time_interval_minutes(df)
+        self.mw.df = df
+        self.mw.interval_min = interval
+        self.path_edit.setText(csv_path)
+        self.status_label.setText(
+            f"<b style='color:green'>Example loaded</b> — {len(df):,} records | "
+            f"{interval}-min interval | "
+            f"{df.index.min().date()} to {df.index.max().date()}"
+        )
+        self._show_preview(df)
+        self.mw.unlock_after_data_loaded()
+
+        # Also load example config if available
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if "tasks" in data:
+                    self.mw.config_tab.task_table.load_tasks(data["tasks"])
+                if "n_sims" in data:
+                    self.mw.config_tab.n_sims_spin.setValue(data["n_sims"])
+                if "pvals" in data:
+                    self.mw.config_tab.pvals_edit.setText(",".join(str(p) for p in data["pvals"]))
+            except Exception:
+                pass  # Config is optional, data loading is the critical part
+
+        self.mw.statusBar().showMessage(
+            "Example data and config loaded — Go to Tab 2 to review, then Tab 3 to run"
+        )
 
     def _show_preview(self, df: pd.DataFrame, max_rows=200):
         cols = list(df.columns)
@@ -186,18 +308,28 @@ class ConfigTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
+        layout.addWidget(_section("Step 2: Define Tasks & Settings"))
+        layout.addWidget(_guide(
+            "Each task represents one operation phase (e.g. mobilization, installation). "
+            "Set the weather thresholds — work is blocked when Hs or Wind exceeds these limits."
+        ))
+
         # --- Task table ---
         task_group = QGroupBox("Tasks")
         tg = QVBoxLayout(task_group)
 
         btn_row = QHBoxLayout()
         btn_add = QPushButton("+ Add Task")
+        btn_add.setToolTip("Add a new task row to the table")
         btn_add.clicked.connect(lambda: self.task_table.add_row())
         btn_remove = QPushButton("- Remove Selected")
+        btn_remove.setToolTip("Remove the selected task row")
         btn_remove.clicked.connect(lambda: self.task_table.remove_selected())
         btn_import = QPushButton("Import JSON...")
+        btn_import.setToolTip("Load task and config definitions from a JSON file")
         btn_import.clicked.connect(self._import_json)
         btn_export = QPushButton("Export JSON...")
+        btn_export.setToolTip("Save current tasks and settings to a JSON file for reuse")
         btn_export.clicked.connect(self._export_json)
         for b in (btn_add, btn_remove, btn_import, btn_export):
             btn_row.addWidget(b)
@@ -220,12 +352,23 @@ class ConfigTab(QWidget):
         self.n_sims_spin.setRange(100, 50000)
         self.n_sims_spin.setValue(1000)
         self.n_sims_spin.setSingleStep(100)
+        self.n_sims_spin.setToolTip(
+            "Number of Monte Carlo iterations.\n"
+            "More = more accurate but slower.\n"
+            "Recommended: 1000 for quick analysis, 5000+ for final reports."
+        )
         r1.addWidget(self.n_sims_spin)
         col1.addLayout(r1)
 
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("Percentiles:"))
         self.pvals_edit = QLineEdit("50,75,90")
+        self.pvals_edit.setToolTip(
+            "Comma-separated percentile values to report (0-100).\n"
+            "P50 = median estimate\n"
+            "P75 = 75% confidence\n"
+            "P90 = conservative estimate (90% confidence)"
+        )
         r2.addWidget(self.pvals_edit)
         col1.addLayout(r2)
 
@@ -234,6 +377,11 @@ class ConfigTab(QWidget):
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(0, 99999)
         self.seed_spin.setValue(7)
+        self.seed_spin.setToolTip(
+            "Random seed for reproducibility.\n"
+            "Same seed = same results every time.\n"
+            "Change to get different random samples."
+        )
         r3.addWidget(self.seed_spin)
         col1.addLayout(r3)
         sg.addLayout(col1)
@@ -242,13 +390,30 @@ class ConfigTab(QWidget):
         col2 = QVBoxLayout()
         self.radio_continuous = QRadioButton("Continuous mode")
         self.radio_continuous.setChecked(True)
+        self.radio_continuous.setToolTip(
+            "Work requires an uninterrupted weather window.\n"
+            "If bad weather hits mid-task, the entire block must restart."
+        )
         self.radio_split = QRadioButton("Split (accumulated) mode")
+        self.radio_split.setToolTip(
+            "Work can be paused and resumed.\n"
+            "Worked hours accumulate across multiple weather windows."
+        )
         col2.addWidget(self.radio_continuous)
         col2.addWidget(self.radio_split)
 
+        col2.addSpacing(8)
         self.radio_permissive = QRadioButton("Permissive NA (work OK)")
         self.radio_permissive.setChecked(True)
+        self.radio_permissive.setToolTip(
+            "Missing data (NA) is treated as 'work possible'.\n"
+            "Use when data gaps are likely calm periods."
+        )
         self.radio_conservative = QRadioButton("Conservative NA (work blocked)")
+        self.radio_conservative.setToolTip(
+            "Missing data (NA) is treated as 'work blocked'.\n"
+            "Use for worst-case planning."
+        )
         col2.addWidget(self.radio_permissive)
         col2.addWidget(self.radio_conservative)
         sg.addLayout(col2)
@@ -257,6 +422,10 @@ class ConfigTab(QWidget):
         col3 = QVBoxLayout()
         month_row = QHBoxLayout()
         self.month_check = QCheckBox("Start month:")
+        self.month_check.setToolTip(
+            "Restrict simulation start to a specific month.\n"
+            "Useful if the campaign has a planned start season."
+        )
         self.month_combo = QComboBox()
         self.month_combo.addItems([str(m) for m in range(1, 13)])
         self.month_combo.setEnabled(False)
@@ -267,6 +436,10 @@ class ConfigTab(QWidget):
 
         cal_row = QHBoxLayout()
         self.cal_check = QCheckBox("Business hours:")
+        self.cal_check.setToolTip(
+            "Restrict work to specific hours of the day.\n"
+            "Example: 8-18 means work only between 08:00 and 18:00."
+        )
         self.cal_start = QSpinBox()
         self.cal_start.setRange(0, 23)
         self.cal_start.setValue(8)
@@ -322,6 +495,9 @@ class ConfigTab(QWidget):
                 data = json.load(f)
             if "tasks" in data:
                 self.task_table.load_tasks(data["tasks"])
+            else:
+                QMessageBox.warning(self, "Warning", "JSON file has no 'tasks' key.")
+                return
             if "n_sims" in data:
                 self.n_sims_spin.setValue(data["n_sims"])
             if "pvals" in data:
@@ -369,16 +545,23 @@ class RunTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        self.info_label = QLabel("Load data and configure tasks, then click Start.")
+        layout.addWidget(_section("Step 3: Run Simulation"))
+        self.info_label = QLabel(
+            "Click <b>Start Simulation</b> to run. "
+            "The simulator randomly samples start dates from historical data "
+            "and measures how long each campaign takes under real weather conditions."
+        )
         self.info_label.setWordWrap(True)
         layout.addWidget(self.info_label)
 
         btn_row = QHBoxLayout()
         self.btn_start = QPushButton("Start Simulation")
         self.btn_start.setObjectName("primary")
+        self.btn_start.setToolTip("Begin Monte Carlo simulation with current data and settings")
         self.btn_start.clicked.connect(self._start)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setToolTip("Stop the running simulation")
         self.btn_cancel.clicked.connect(self._cancel)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_cancel)
@@ -446,14 +629,15 @@ class RunTab(QWidget):
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.progress.setValue(100)
-        self.log_area.append("Done!")
+        self.log_area.append("Done! Switching to Results tab...")
 
         self.mw.results_df = res_df
         self.mw.summary_df = summary_df
         self.mw.results_tab.load_results(res_df, summary_df)
         self.mw.charts_tab.update_charts(res_df, self.mw.config_tab.build_config().pvals)
+        self.mw.unlock_after_simulation()
         self.mw.tabs.setCurrentWidget(self.mw.results_tab)
-        self.mw.statusBar().showMessage("Simulation complete")
+        self.mw.statusBar().showMessage("Simulation complete — Review results in Tab 4")
 
     def _on_error(self, msg):
         self.btn_start.setEnabled(True)
@@ -466,6 +650,17 @@ class RunTab(QWidget):
 # Tab 4 — Results
 # =====================================================================
 
+_P_EXPLANATIONS = {
+    "P50": "Median — 50% chance of finishing within this duration",
+    "P75": "75% confidence — reasonable planning estimate",
+    "P90": "Conservative — 90% chance of finishing within this duration",
+    "Mean": "Average duration across all simulations",
+    "Std": "Standard deviation — measures spread of results",
+    "Min": "Best-case scenario (shortest simulation)",
+    "Max": "Worst-case scenario (longest simulation)",
+}
+
+
 class ResultsTab(QWidget):
     """Display summary statistics and raw results."""
 
@@ -477,11 +672,22 @@ class ResultsTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
+        layout.addWidget(_section("Results"))
+
+        # Interpretation panel
+        self.interpretation = QLabel("")
+        self.interpretation.setObjectName("interpretation")
+        self.interpretation.setWordWrap(True)
+        self.interpretation.setVisible(False)
+        layout.addWidget(self.interpretation)
+
         # Export buttons
         btn_row = QHBoxLayout()
         btn_csv = QPushButton("Export CSV...")
+        btn_csv.setToolTip("Save raw simulation results as a CSV file")
         btn_csv.clicked.connect(self._export_csv)
         btn_excel = QPushButton("Export Excel...")
+        btn_excel.setToolTip("Save formatted report with summary, results, and task info")
         btn_excel.clicked.connect(self._export_excel)
         btn_row.addWidget(btn_csv)
         btn_row.addWidget(btn_excel)
@@ -490,9 +696,21 @@ class ResultsTab(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: summary
+        # Left: summary + explanation
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
         self.summary_table = SummaryTable()
-        splitter.addWidget(self.summary_table)
+        left_layout.addWidget(self.summary_table)
+
+        self.explain_area = QTextEdit()
+        self.explain_area.setReadOnly(True)
+        self.explain_area.setMaximumHeight(180)
+        self.explain_area.setStyleSheet("font-size: 12px; color: #555; background: #fafafa;")
+        left_layout.addWidget(self.explain_area)
+
+        splitter.addWidget(left_panel)
 
         # Right: full results
         self.results_view = QTableWidget()
@@ -501,12 +719,38 @@ class ResultsTab(QWidget):
         self.results_view.setSortingEnabled(True)
         splitter.addWidget(self.results_view)
 
-        splitter.setSizes([300, 700])
+        splitter.setSizes([350, 650])
         layout.addWidget(splitter, stretch=1)
 
     def load_results(self, res_df: pd.DataFrame, summary_df: pd.DataFrame):
         self.summary_table.load_summary(summary_df)
         self._populate_table(res_df)
+        self._update_interpretation(summary_df)
+        self._update_explanations(summary_df)
+
+    def _update_interpretation(self, summary_df: pd.DataFrame):
+        """Show a plain-language interpretation of key results."""
+        vals = {row["Metric"]: row["Value_days"] for _, row in summary_df.iterrows()}
+        p50 = vals.get("P50", 0)
+        p90 = vals.get("P90", 0)
+
+        self.interpretation.setText(
+            f"<b>Summary:</b> The campaign is expected to take approximately "
+            f"<b>{p50:.1f} days</b> (median). "
+            f"For conservative planning, allow <b>{p90:.1f} days</b> "
+            f"(90% confidence level)."
+        )
+        self.interpretation.setVisible(True)
+
+    def _update_explanations(self, summary_df: pd.DataFrame):
+        """Fill the explanation panel with metric descriptions."""
+        lines = []
+        for _, row in summary_df.iterrows():
+            metric = str(row["Metric"])
+            value = row["Value_days"]
+            desc = _P_EXPLANATIONS.get(metric, "")
+            lines.append(f"<b>{metric} = {value:.2f} days</b><br>{desc}")
+        self.explain_area.setHtml("<br>".join(lines))
 
     def _populate_table(self, df: pd.DataFrame):
         cols = list(df.columns)
@@ -558,18 +802,28 @@ class ChartsTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
+        layout.addWidget(_section("Charts"))
+
         ctrl = QHBoxLayout()
         ctrl.addWidget(QLabel("Chart:"))
         self.chart_combo = QComboBox()
         self.chart_combo.addItems(["Histogram + P-values", "CDF", "Work vs Wait Scatter", "Timeline (Top 5)"])
+        self.chart_combo.setToolTip(
+            "Histogram: Duration distribution with percentile lines\n"
+            "CDF: Cumulative probability curve\n"
+            "Scatter: Work time vs. weather waiting time\n"
+            "Timeline: Longest simulations broken into work/wait"
+        )
         self.chart_combo.currentIndexChanged.connect(self._switch_chart)
         ctrl.addWidget(self.chart_combo)
 
         btn_save = QPushButton("Save Chart...")
+        btn_save.setToolTip("Save the current chart as PNG or PDF")
         btn_save.clicked.connect(self._save)
         ctrl.addWidget(btn_save)
 
         btn_save_all = QPushButton("Save All Charts...")
+        btn_save_all.setToolTip("Save all chart types to a folder")
         btn_save_all.clicked.connect(self._save_all)
         ctrl.addWidget(btn_save_all)
         ctrl.addStretch()
@@ -694,12 +948,17 @@ class OptimalMonthTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        self.info_label = QLabel("Uses current data + task config to test every start month.")
-        layout.addWidget(self.info_label)
+        layout.addWidget(_section("Optimal Start Month"))
+        layout.addWidget(_guide(
+            "Runs the simulation for each of the 12 months to find which month "
+            "gives the shortest P90 campaign duration. Useful for scheduling "
+            "when you have flexibility on start date."
+        ))
 
         btn_row = QHBoxLayout()
         self.btn_run = QPushButton("Analyze All 12 Months")
         self.btn_run.setObjectName("primary")
+        self.btn_run.setToolTip("Run simulation for each start month using current tasks and settings")
         self.btn_run.clicked.connect(self._run)
         btn_row.addWidget(self.btn_run)
         self.progress = QProgressBar()
@@ -748,8 +1007,11 @@ class OptimalMonthTab(QWidget):
 
     def _on_finished(self, result_df, optimal):
         self.btn_run.setEnabled(True)
+        p90_min = result_df["P90_days"].min()
+        p90_max = result_df["P90_days"].max()
         self.result_label.setText(
-            f"Optimal start month: {optimal}  (P90 = {result_df['P90_days'].min():.1f} days)"
+            f"Optimal start month: {optimal}  "
+            f"(P90 = {p90_min:.1f} days vs worst {p90_max:.1f} days)"
         )
 
         # Table
