@@ -293,7 +293,12 @@ class ConfigTab(QWidget):
         if not tasks:
             raise ValueError("At least one task is required.")
 
-        pvals = [int(x.strip()) for x in self.pvals_edit.text().split(",")]
+        try:
+            pvals = [int(x.strip()) for x in self.pvals_edit.text().split(",")]
+            if any(not 0 <= p <= 100 for p in pvals):
+                raise ValueError("Percentiles must be between 0 and 100")
+        except ValueError as exc:
+            raise ValueError(f"Invalid percentiles: {exc}")
         start_month = int(self.month_combo.currentText()) if self.month_check.isChecked() else None
         cal_hours = (self.cal_start.value(), self.cal_end.value()) if self.cal_check.isChecked() else None
 
@@ -397,6 +402,11 @@ class RunTab(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Config Error", str(exc))
             return
+
+        # Clean up previous worker if still running
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(3000)
 
         self.log_area.clear()
         self.progress.setValue(0)

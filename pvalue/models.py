@@ -67,6 +67,8 @@ class SimulationConfig:
             raise ValueError(f"na_handling must be 'permissive' or 'conservative', got '{self.na_handling}'")
         if self.start_month is not None and not 1 <= self.start_month <= 12:
             raise ValueError(f"start_month must be 1-12, got {self.start_month}")
+        if any(not 0 <= p <= 100 for p in self.pvals):
+            raise ValueError(f"pvals must be between 0 and 100, got {self.pvals}")
 
     @classmethod
     def from_dict(cls, data: dict) -> "SimulationConfig":

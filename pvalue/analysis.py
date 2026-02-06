@@ -101,6 +101,7 @@ def batch_run(
                 config.tasks,
                 n_sims=config.n_sims,
                 start_month=config.start_month,
+                calendar_mask_fn=config.build_calendar_mask_fn(),
                 split_mode=config.split_mode,
                 time_interval_min=interval_min,
                 na_handling=config.na_handling,
@@ -140,6 +141,7 @@ def analyze_optimal_start_month(
         DataFrame with Month, P90_days, Mean_days columns.
     """
     interval_min = get_time_interval_minutes(df)
+    cal_fn = config.build_calendar_mask_fn()
     rows = []
 
     for month in range(1, 13):
@@ -149,6 +151,7 @@ def analyze_optimal_start_month(
             config.tasks,
             n_sims=max(500, config.n_sims // 2),
             start_month=month,
+            calendar_mask_fn=cal_fn,
             split_mode=config.split_mode,
             time_interval_min=interval_min,
             na_handling=config.na_handling,

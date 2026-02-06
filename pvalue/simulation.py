@@ -134,17 +134,18 @@ def simulate_campaign(
         yr = int(np.random.choice(years))
         block = df[df["year"] == yr]
 
-        # Pick random start point
+        # Pick random start point (by index, not timestamp arithmetic)
         if start_month is None:
-            offset = np.random.randint(0, len(block))
-            start_time = block.index[0] + pd.Timedelta(hours=offset)
+            start_idx = np.random.randint(0, len(block))
         else:
-            month_block = block[block.index.month == start_month]
-            if len(month_block) == 0:
-                month_block = block
-            start_time = month_block.index[np.random.randint(0, len(month_block))]
+            month_mask = block.index.month == start_month
+            month_indices = np.where(month_mask)[0]
+            if len(month_indices) == 0:
+                start_idx = np.random.randint(0, len(block))
+            else:
+                start_idx = int(np.random.choice(month_indices))
 
-        start_idx = block.index.get_indexer([start_time])[0]
+        start_time = block.index[start_idx]
         current_idx = start_idx
 
         cal_mask = (

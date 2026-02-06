@@ -137,6 +137,7 @@ class TaskTable(QTableWidget):
         from pvalue.models import Task
 
         tasks = []
+        errors = []
         for row in range(self.rowCount()):
             try:
                 name = self.item(row, 0).text().strip()
@@ -154,8 +155,10 @@ class TaskTable(QTableWidget):
                         teardown_h=teardown,
                     )
                 )
-            except (ValueError, AttributeError):
-                continue
+            except (ValueError, AttributeError) as exc:
+                errors.append(f"Row {row + 1}: {exc}")
+        if errors and not tasks:
+            raise ValueError("No valid tasks: " + "; ".join(errors))
         return tasks
 
     def load_tasks(self, tasks: List[dict]):
