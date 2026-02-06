@@ -3,10 +3,52 @@
 Usage:
     python build_exe.py            # one-folder build (recommended)
     python build_exe.py --onefile  # single .exe (slower startup)
+
+If the build hangs at "Looking for dynamic libraries", you likely have
+heavy packages (tensorflow, torch, etc.) installed globally.
+This script excludes known offenders. For best results, build inside
+a clean virtual environment:
+
+    python -m venv .build_venv
+    .build_venv\\Scripts\\activate
+    pip install -e ".[desktop,excel,build]"
+    python build_exe.py
 """
 
 import subprocess
 import sys
+
+# Packages to exclude — these are never used by PValueSimulator but
+# PyInstaller will try to scan them if they're installed, causing
+# massive build times or hangs.
+_EXCLUDE = [
+    "streamlit",
+    "plotly",
+    "tkinter",
+    "tensorflow",
+    "torch",
+    "keras",
+    "scipy.spatial.cKDTree",
+    "IPython",
+    "jupyter",
+    "notebook",
+    "pytest",
+    "sphinx",
+    "docutils",
+    "PIL.ImageTk",
+    "cv2",
+    "sklearn",
+    "sqlalchemy",
+    "flask",
+    "django",
+    "boto3",
+    "botocore",
+    "setuptools",
+    "pkg_resources",
+    "_pydevd_bundle",
+    "pydevd",
+    "debugpy",
+]
 
 
 def main():
@@ -16,28 +58,30 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--name", "PValueSimulator",
         "--noconsole",
-        "--add-data", "examples:examples",
+        "--add-data", "examples;examples",  # Windows uses ; as separator
+        # --- hidden imports (required) ---
         "--hidden-import", "pvalue",
         "--hidden-import", "pvalue.gui",
         "--hidden-import", "pvalue.gui.main_window",
         "--hidden-import", "pvalue.gui.tabs",
         "--hidden-import", "pvalue.gui.widgets",
         "--hidden-import", "pvalue.gui.workers",
-        "--hidden-import", "matplotlib.backends.backend_qtagg",
-        "--hidden-import", "PyQt6.QtCore",
-        "--hidden-import", "PyQt6.QtGui",
-        "--hidden-import", "PyQt6.QtWidgets",
         "--hidden-import", "pvalue.models",
         "--hidden-import", "pvalue.data",
         "--hidden-import", "pvalue.simulation",
         "--hidden-import", "pvalue.visualization",
         "--hidden-import", "pvalue.reporting",
         "--hidden-import", "pvalue.analysis",
+        "--hidden-import", "matplotlib.backends.backend_qtagg",
+        "--hidden-import", "PyQt6.QtCore",
+        "--hidden-import", "PyQt6.QtGui",
+        "--hidden-import", "PyQt6.QtWidgets",
         "--hidden-import", "openpyxl",
-        "--exclude-module", "streamlit",
-        "--exclude-module", "plotly",
-        "--exclude-module", "tkinter",
     ]
+
+    # Exclude heavy/unused packages
+    for mod in _EXCLUDE:
+        cmd += ["--exclude-module", mod]
 
     if onefile:
         cmd.append("--onefile")
