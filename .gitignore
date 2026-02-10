@@ -30,6 +30,10 @@ batch_outputs/
 *.xlsx
 *.png
 
+# Build
+.build_venv/
+*.spec.bak
+
 # Environment
 .env
 .env.local

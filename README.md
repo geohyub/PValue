@@ -11,8 +11,10 @@ Given historical metocean data (wave height, wind speed), the simulator estimate
 - **ERA5 hindcast support** — auto-parses ERA5 30-year hindcast CSVs
 - **Optimal start-month** — analyses all 12 months to find the best window
 - **Batch comparison** — run multiple sites and compare side-by-side
-- **Interactive web GUI** — Streamlit dashboard with Plotly charts
+- **Desktop GUI (PyQt6)** — standalone application with step-by-step guided workflow
+- **Web GUI (Streamlit)** — browser-based dashboard with Plotly charts
 - **CLI** — Click-based command-line interface
+- **Offline .exe** — PyInstaller packaging for Windows distribution
 - **Excel reports** — formatted `.xlsx` with summary, results, and task sheets
 
 ## Quick Start
@@ -26,11 +28,37 @@ pip install -e ".[all]"
 Or install only what you need:
 
 ```bash
-pip install -e .           # core (CLI only)
-pip install -e ".[gui]"    # + Streamlit web GUI
-pip install -e ".[excel]"  # + Excel report generation
-pip install -e ".[dev]"    # + pytest
+pip install -e .              # core (CLI only)
+pip install -e ".[desktop]"   # + PyQt6 desktop GUI
+pip install -e ".[gui]"       # + Streamlit web GUI
+pip install -e ".[excel]"     # + Excel report generation
+pip install -e ".[dev]"       # + pytest
 ```
+
+### Desktop GUI
+
+```bash
+pvalue-desktop
+# or:
+python -m pvalue.desktop
+```
+
+The desktop GUI features:
+- **Step-by-step workflow** — tabs are unlocked progressively (Data → Config → Run → Results)
+- **Tooltips on every widget** — hover for detailed explanations
+- **Load Example button** — try the simulator instantly with bundled sample data
+- **Result interpretation** — plain-language P-value explanations
+- **Charts** — histogram, CDF, work/wait scatter, timeline
+
+### Web GUI
+
+```bash
+pvalue gui
+# or directly:
+streamlit run pvalue/app.py
+```
+
+On Windows, double-click **`run_web_gui.bat`** to launch the web interface.
 
 ### CLI Usage
 
@@ -46,17 +74,6 @@ pvalue optimal-month data.csv -c config.json
 
 # Validate a CSV file
 pvalue validate data.csv --csv-type hindcast
-
-# Launch web GUI
-pvalue gui
-```
-
-### Web GUI
-
-```bash
-pvalue gui
-# or directly:
-streamlit run pvalue/app.py
 ```
 
 ### Python API
@@ -75,6 +92,20 @@ results = simulate_campaign(df, tasks, n_sims=1000)
 summary = summarize_pxx(results)
 print(summary)
 ```
+
+## Building Standalone .exe (Windows)
+
+```bash
+# Create clean build environment
+python -m venv .build_venv
+.build_venv\Scripts\activate
+pip install -e ".[desktop,excel,build]"
+
+# Build
+python build_exe.py
+```
+
+Output: `dist/PValueSimulator/` (distribute entire folder — `.exe` + `_internal`)
 
 ## Configuration
 
@@ -101,11 +132,25 @@ Task definitions are provided via JSON:
   "n_sims": 1000,
   "pvals": [50, 75, 90],
   "split_mode": false,
-  "na_handling": "permissive"
+  "na_handling": "permissive",
+  "start_month": null
 }
 ```
 
-See [`examples/`](examples/) for more configuration templates.
+| Field | Description |
+|-------|-------------|
+| `tasks` | Ordered list of operation phases |
+| `duration_h` | Required work hours (weather-dependent) |
+| `thresholds` | Max Hs (m) and Wind (m/s) for work |
+| `setup_h` / `teardown_h` | Additional hours before/after main work |
+| `n_sims` | Number of Monte Carlo iterations (default: 1000) |
+| `pvals` | Percentiles to report, e.g. `[50, 75, 90]` |
+| `split_mode` | `false` = continuous window, `true` = accumulated hours |
+| `na_handling` | `"permissive"` (NA = work OK) or `"conservative"` (NA = blocked) |
+| `start_month` | Restrict start to a month (1-12) or `null` for any |
+| `calendar` | `["all"]` for 24h, or `["custom", "tz", "7-19"]` for business hours |
+
+See [`examples/`](examples/) for sample configs and metocean data.
 
 ## CSV Formats
 
@@ -119,29 +164,47 @@ timestamp,Hs,Wind
 2020-01-01 01:00:00,1.3,9.1
 ```
 
+Supports any regular time interval (10-min, 1-hour, etc.) — auto-detected.
+
 ### Hindcast CSV (ERA5)
 
-ERA5 format with 5-line metadata header. Wind and Hs columns are auto-detected.
+ERA5 format with 5-line metadata header. Wind and Hs columns are auto-detected by pattern matching.
 
 ## Project Structure
 
 ```
 PValue/
-├── pvalue/                  # Main package
-│   ├── __init__.py          # Public API
-│   ├── __main__.py          # python -m pvalue
-│   ├── models.py            # Task, SimulationConfig dataclasses
-│   ├── data.py              # CSV loading, validation, condition masks
-│   ├── simulation.py        # Monte Carlo engine
-│   ├── visualization.py     # Matplotlib chart functions
-│   ├── reporting.py         # Excel report generation
-│   ├── analysis.py          # High-level workflows (batch, optimal month)
-│   ├── cli.py               # Click CLI
-│   └── app.py               # Streamlit web GUI
-├── tests/                   # Unit tests
-├── examples/                # Sample configs
-├── pyproject.toml           # Project metadata & build config
-├── requirements.txt         # Dependencies
+├── pvalue/                     # Main package
+│   ├── __init__.py             # Public API
+│   ├── __main__.py             # python -m pvalue
+│   ├── models.py               # Task, SimulationConfig dataclasses
+│   ├── data.py                 # CSV loading, validation, condition masks
+│   ├── simulation.py           # Monte Carlo engine
+│   ├── analysis.py             # High-level workflows (batch, optimal month)
+│   ├── visualization.py        # Matplotlib chart functions
+│   ├── reporting.py            # Excel report generation
+│   ├── cli.py                  # Click CLI
+│   ├── app.py                  # Streamlit web GUI
+│   ├── desktop.py              # PyQt6 entry point
+│   └── gui/                    # Desktop GUI components
+│       ├── main_window.py      #   Main window + tab management
+│       ├── tabs.py             #   Tab pages (Data, Config, Run, Results, Charts, Optimal)
+│       ├── widgets.py          #   Reusable widgets (ChartWidget, SummaryTable, TaskTable)
+│       └── workers.py          #   QThread workers for background simulation
+├── tests/                      # Unit tests (38 tests)
+│   ├── test_models.py
+│   ├── test_data.py
+│   └── test_simulation.py
+├── examples/                   # Sample data & configs
+│   ├── sample_metocean.csv     #   Example metocean CSV (10-day, 1h interval)
+│   ├── sample_config.json      #   Single-run config template
+│   └── batch_config.json       #   Batch-run config template
+├── build_exe.py                # PyInstaller build script
+├── build.spec                  # PyInstaller spec file
+├── run_web_gui.bat             # Windows launcher for Streamlit GUI
+├── pyproject.toml              # Project metadata & build config
+├── requirements.txt            # Core dependencies
+├── P_Value_Program.py          # Legacy monolithic script (reference)
 └── README.md
 ```
 
@@ -157,6 +220,10 @@ pytest
 # Run tests with coverage
 pytest --cov=pvalue
 ```
+
+## Verification
+
+The refactored `pvalue` package has been verified against the original `P_Value_Program.py` — all P-value outputs (P60, P70, P80, P90, P100, Mean, Std, Min, Max) match exactly with identical data, config, and seed.
 
 ## License
 
