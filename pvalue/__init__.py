@@ -1,6 +1,6 @@
 """Marine P-Value Simulator - Monte Carlo simulation for marine operation campaigns."""
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 from pvalue.models import Task
 from pvalue.data import load_csv, validate_metocean, get_time_interval_minutes

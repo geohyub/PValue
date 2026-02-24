@@ -26,5 +26,7 @@
   "pvals": [50, 75, 90],
   "split_mode": false,
   "na_handling": "permissive",
-  "start_month": null
+  "start_month": null,
+  "seed": 7,
+  "calendar": ["all"]
 }
