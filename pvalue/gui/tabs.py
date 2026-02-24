@@ -502,6 +502,65 @@ class ConfigTab(QWidget):
                 self.n_sims_spin.setValue(data["n_sims"])
             if "pvals" in data:
                 self.pvals_edit.setText(",".join(str(p) for p in data["pvals"]))
+            if "seed" in data:
+                self.seed_spin.setValue(data["seed"])
+
+            # Split mode
+            if "split_mode" in data:
+                if data["split_mode"]:
+                    self.radio_split.setChecked(True)
+                else:
+                    self.radio_continuous.setChecked(True)
+
+            # NA handling
+            if "na_handling" in data:
+                if data["na_handling"] == "conservative":
+                    self.radio_conservative.setChecked(True)
+                else:
+                    self.radio_permissive.setChecked(True)
+
+            # Start month
+            if "start_month" in data and data["start_month"] is not None:
+                self.month_check.setChecked(True)
+                self.month_combo.setCurrentText(str(data["start_month"]))
+            else:
+                self.month_check.setChecked(False)
+
+            # Calendar / business hours
+            cal = data.get("calendar", ["all"])
+            if isinstance(cal, list) and len(cal) >= 1 and cal[0] == "custom" and len(cal) >= 3:
+                hours_str = cal[2]
+                try:
+                    sh, eh = map(int, str(hours_str).split("-"))
+                    self.cal_check.setChecked(True)
+                    self.cal_start.setValue(sh)
+                    self.cal_end.setValue(eh)
+                except ValueError:
+                    self.cal_check.setChecked(False)
+            elif isinstance(cal, list) and len(cal) >= 3 and cal[0] == "all":
+                # "all" mode but hours info present — show in UI but calendar not enforced
+                hours_str = cal[2] if len(cal) >= 3 else None
+                if hours_str:
+                    try:
+                        sh, eh = map(int, str(hours_str).split("-"))
+                        self.cal_check.setChecked(False)
+                        self.cal_start.setValue(sh)
+                        self.cal_end.setValue(eh)
+                    except ValueError:
+                        self.cal_check.setChecked(False)
+                else:
+                    self.cal_check.setChecked(False)
+            else:
+                self.cal_check.setChecked(False)
+
+            # calendar_hours (refactored format)
+            if "calendar_hours" in data and data["calendar_hours"] is not None:
+                ch = data["calendar_hours"]
+                if isinstance(ch, (list, tuple)) and len(ch) == 2:
+                    self.cal_check.setChecked(True)
+                    self.cal_start.setValue(ch[0])
+                    self.cal_end.setValue(ch[1])
+
             self.mw.statusBar().showMessage(f"Config imported from {os.path.basename(path)}")
         except Exception as exc:
             QMessageBox.critical(self, "Import Error", str(exc))
@@ -521,7 +580,13 @@ class ConfigTab(QWidget):
                 "pvals": config.pvals,
                 "split_mode": config.split_mode,
                 "na_handling": config.na_handling,
+                "start_month": config.start_month,
+                "seed": config.seed,
             }
+            if config.calendar_hours:
+                data["calendar"] = ["custom", "UTC", f"{config.calendar_hours[0]}-{config.calendar_hours[1]}"]
+            else:
+                data["calendar"] = ["all"]
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             self.mw.statusBar().showMessage(f"Config exported to {os.path.basename(path)}")
