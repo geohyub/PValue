@@ -1,0 +1,18 @@
+# Core dependencies
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+click>=8.0
+
+# Optional: Desktop GUI (pip install -e ".[desktop]")
+# PyQt6>=6.5
+
+# Optional: Web GUI (pip install -e ".[gui]")
+# streamlit>=1.30
+# plotly>=5.18
+
+# Optional: Excel reports (pip install -e ".[excel]")
+# openpyxl>=3.1
+
+# Optional: Build .exe (pip install -e ".[build]")
+# pyinstaller>=6.0
