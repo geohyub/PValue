@@ -1,0 +1,19 @@
+{
+  "start_month": 4,
+  "n_sims": 2000,
+  "pvals": [60, 70, 80, 90, 100],
+  "calendar": ["custom", "Asia/Seoul", "7-19"],
+  "split_mode": false,
+  "tasks": [
+    {"name":"BH01","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH02","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH03","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH04","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH05","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH06","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH07","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH08","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH09","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0},
+    {"name":"BH10","duration_h":48,"thresholds":{"Hs":1.2,"Wind":10.0},"setup_h":0,"teardown_h":0}
+  ]
+}

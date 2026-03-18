@@ -76,7 +76,7 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_tabs()
         self._enforce_tab_access()
-        self.statusBar().showMessage("Ready — Start by loading a CSV file in the Data tab")
+        self.statusBar().showMessage("Ready — Load data from CSV or KMA API in the Data tab")
 
     # ----- Menu bar -----
 

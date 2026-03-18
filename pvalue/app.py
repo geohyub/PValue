@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,19 @@ from pvalue import __version__
 from pvalue.data import get_time_interval_minutes, load_csv, validate_metocean
 from pvalue.models import SimulationConfig, Task
 from pvalue.simulation import simulate_campaign, summarize_pxx
+
+# Lazy API imports (optional dependencies)
+from pvalue.kma import (
+    STATION_TYPES as KMA_STATION_TYPES,
+    ALL_STATIONS as KMA_ALL_STATIONS,
+    fetch_timeseries as kma_fetch,
+    get_station_label as kma_label,
+)
+from pvalue.khoa import (
+    KHOA_STATIONS,
+    fetch_timeseries as khoa_fetch,
+    get_station_label as khoa_label,
+)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -94,10 +108,38 @@ def _plotly_scatter(res: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# Shared: upload + validate
+# Shared: data source (CSV upload or API fetch)
 # ---------------------------------------------------------------------------
 
-def upload_and_validate(key_prefix="main"):
+def _validate_and_show(df, key_prefix):
+    """Validate DataFrame and display summary. Returns (df, csv_type) or (None, None)."""
+    ok, msg = validate_metocean(df)
+    if not ok:
+        st.error(f"Validation failed: {msg}")
+        return None, None
+    interval = get_time_interval_minutes(df)
+    st.success(f"Loaded {len(df):,} records | {interval}-min interval | {df.index.min().date()} to {df.index.max().date()}")
+
+    # Missing data warning
+    hs_nan = int(df["Hs"].isna().sum())
+    wind_nan = int(df["Wind"].isna().sum())
+    total = len(df)
+    if hs_nan > 0 or wind_nan > 0:
+        parts = []
+        if hs_nan > 0:
+            parts.append(f"Hs {hs_nan:,}건 ({hs_nan/total*100:.1f}%)")
+        if wind_nan > 0:
+            parts.append(f"Wind {wind_nan:,}건 ({wind_nan/total*100:.1f}%)")
+        st.warning(
+            f"⚠ 결측 데이터 감지: {', '.join(parts)}  \n"
+            f"결측 구간은 시뮬레이션에서 작업 가능으로 처리됩니다 (NA handling: permissive)"
+        )
+
+    return df, "general"
+
+
+def _csv_source(key_prefix):
+    """CSV upload data source."""
     csv_type = st.selectbox("CSV Format", ["general", "hindcast"], key=f"{key_prefix}_type")
     uploaded = st.file_uploader("Upload metocean CSV", type=["csv"], key=f"{key_prefix}_file")
 
@@ -124,14 +166,132 @@ def upload_and_validate(key_prefix="main"):
         st.error(f"Failed to load CSV: {exc}")
         return None, csv_type
 
-    ok, msg = validate_metocean(df)
-    if not ok:
-        st.error(f"Validation failed: {msg}")
-        return None, csv_type
+    return _validate_and_show(df, key_prefix)
 
-    interval = get_time_interval_minutes(df)
-    st.success(f"Loaded {len(df):,} records | {interval}-min interval | {df.index.min().date()} to {df.index.max().date()}")
-    return df, csv_type
+
+def _kma_api_source(key_prefix):
+    """KMA API data source."""
+    st.caption("기상청 API Hub에서 해양기상부이/등표/기상1호 데이터를 가져옵니다.")
+    st.warning("⚠ API 데이터는 파고(Hs) 소수점 1자리 정밀도로 제공됩니다 (P값 차이 ~1% 이내)")
+
+    api_key = st.text_input("KMA API 인증키", type="password", key=f"{key_prefix}_kma_key",
+                            help="apihub.kma.go.kr에서 무료 발급")
+    if not api_key:
+        st.info("API 인증키를 입력하세요.")
+        return None, None
+
+    c1, c2 = st.columns(2)
+    stype = c1.selectbox("관측 유형", list(KMA_STATION_TYPES.keys()),
+                         format_func=lambda x: KMA_STATION_TYPES[x]["label"],
+                         key=f"{key_prefix}_kma_stype")
+    stations = KMA_ALL_STATIONS.get(stype, {})
+    stn_options = sorted(stations.keys())
+    stn_id = c2.selectbox("관측소", stn_options,
+                          format_func=lambda x: f"{stations[x]} ({x})",
+                          key=f"{key_prefix}_kma_stn")
+
+    c3, c4 = st.columns(2)
+    default_start = datetime.now() - timedelta(days=365 * 3)
+    start_date = c3.date_input("시작일", value=default_start, key=f"{key_prefix}_kma_start")
+    end_date = c4.date_input("종료일", value=datetime.now(), key=f"{key_prefix}_kma_end")
+
+    if not st.button("Fetch Data", type="primary", key=f"{key_prefix}_kma_fetch"):
+        return None, None
+
+    start_dt = datetime(start_date.year, start_date.month, start_date.day)
+    end_dt = datetime(end_date.year, end_date.month, end_date.day, 23, 59)
+
+    progress = st.progress(0, text="KMA API에서 데이터 수신 중...")
+    try:
+        df = kma_fetch(
+            api_key, stype, stn_id, start_dt, end_dt,
+            progress_callback=lambda cur, tot: progress.progress(cur / tot, text=f"수신 중... {cur}/{tot}건")
+        )
+        progress.empty()
+        label = kma_label(stype, stn_id)
+        st.info(f"📡 {label} | {len(df):,}건")
+
+        # CSV download button
+        stations = KMA_ALL_STATIONS.get(stype, {})
+        name = stations.get(stn_id, stn_id).replace(" ", "_")
+        fname = f"{name}_{df.index.min().strftime('%y%m')}_{df.index.max().strftime('%y%m')}.csv"
+        csv_out = df.copy()
+        csv_out.index.name = "timestamp"
+        st.download_button("Save CSV", csv_out.to_csv(), fname, "text/csv",
+                           key=f"{key_prefix}_kma_dl")
+
+        return _validate_and_show(df, key_prefix)
+    except Exception as e:
+        progress.empty()
+        st.error(f"API 오류: {e}")
+        return None, None
+
+
+def _khoa_api_source(key_prefix):
+    """KHOA API data source."""
+    st.caption("국립해양조사원(KHOA) 해양관측부이 데이터를 공공데이터포털(data.go.kr)에서 가져옵니다.")
+    st.warning("⚠ API 데이터는 파고(Hs) 소수점 1자리 정밀도로 제공됩니다 (P값 차이 ~1% 이내). "
+               "고정밀(소수 2자리) 데이터가 필요하면 KHOA 홈페이지에서 CSV를 다운받아 사용하세요.")
+
+    service_key = st.text_input("data.go.kr 인증키", type="password", key=f"{key_prefix}_khoa_key",
+                                help="공공데이터포털에서 무료 발급")
+    if not service_key:
+        st.info("API 인증키를 입력하세요.")
+        return None, None
+
+    stn_options = sorted(KHOA_STATIONS.keys())
+    obs_code = st.selectbox("관측소", stn_options,
+                            format_func=lambda x: f"{KHOA_STATIONS[x]} ({x})",
+                            key=f"{key_prefix}_khoa_stn")
+
+    c1, c2 = st.columns(2)
+    default_start = datetime.now() - timedelta(days=365 * 3)
+    start_date = c1.date_input("시작일", value=default_start, key=f"{key_prefix}_khoa_start")
+    end_date = c2.date_input("종료일", value=datetime.now(), key=f"{key_prefix}_khoa_end")
+
+    if not st.button("Fetch Data", type="primary", key=f"{key_prefix}_khoa_fetch"):
+        return None, None
+
+    start_dt = datetime(start_date.year, start_date.month, start_date.day)
+    end_dt = datetime(end_date.year, end_date.month, end_date.day, 23, 59)
+
+    total_days = (end_dt.date() - start_dt.date()).days + 1
+    progress = st.progress(0, text="KHOA API에서 데이터 수신 중...")
+    try:
+        df = khoa_fetch(
+            service_key, obs_code, start_dt, end_dt,
+            progress_callback=lambda cur, tot: progress.progress(cur / tot, text=f"수신 중... {cur}/{tot}일")
+        )
+        progress.empty()
+        label = khoa_label(obs_code)
+        st.info(f"📡 {label} | {len(df):,}건")
+
+        # CSV download button
+        name = KHOA_STATIONS.get(obs_code, obs_code).replace(" ", "_")
+        fname = f"{name}_{df.index.min().strftime('%y%m')}_{df.index.max().strftime('%y%m')}.csv"
+        csv_out = df.copy()
+        csv_out.index.name = "timestamp"
+        st.download_button("Save CSV", csv_out.to_csv(), fname, "text/csv",
+                           key=f"{key_prefix}_khoa_dl")
+
+        return _validate_and_show(df, key_prefix)
+    except Exception as e:
+        progress.empty()
+        st.error(f"API 오류: {e}")
+        return None, None
+
+
+def upload_and_validate(key_prefix="main"):
+    """Combined data source: CSV, KMA API, or KHOA API."""
+    source = st.radio("Data Source", ["CSV 파일", "KMA API (기상청)", "KHOA API (해양조사원)"],
+                      horizontal=True, key=f"{key_prefix}_source")
+
+    if source == "CSV 파일":
+        return _csv_source(key_prefix)
+    elif source == "KMA API (기상청)":
+        return _kma_api_source(key_prefix)
+    else:
+        return _khoa_api_source(key_prefix)
 
 
 # ---------------------------------------------------------------------------

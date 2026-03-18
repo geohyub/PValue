@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QDate, QSettings
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -34,6 +36,10 @@ from PyQt6.QtWidgets import (
 
 from pvalue.data import get_time_interval_minutes, load_csv, validate_metocean
 from pvalue.gui.widgets import ChartWidget, SummaryTable, TaskTable
+from pvalue.gui.workers import KhoaFetchWorker, KmaFetchWorker
+from pvalue.khoa import KHOA_STATIONS
+from pvalue.khoa import get_station_label as khoa_get_station_label
+from pvalue.kma import ALL_STATIONS, STATION_TYPES, get_station_label
 from pvalue.models import SimulationConfig, Task
 from pvalue.reporting import generate_excel_report
 from pvalue.simulation import summarize_pxx
@@ -59,11 +65,11 @@ def _section(text: str) -> QLabel:
 
 
 # =====================================================================
-# Tab 1 — Data Loading
+# Tab 1 — Data Loading (with CSV / KMA API sub-tabs)
 # =====================================================================
 
 class DataTab(QWidget):
-    """Load and validate a metocean CSV file."""
+    """Load and validate metocean data from CSV file or KMA API."""
 
     def __init__(self, main_window):
         super().__init__()
@@ -73,15 +79,116 @@ class DataTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # --- Welcome banner ---
+        # --- Header ---
         layout.addWidget(_section("Step 1: Load Metocean Data"))
+
+        # --- Sub-tabs: CSV / KMA API ---
+        self.source_tabs = QTabWidget()
+        self.source_tabs.setDocumentMode(True)
+
+        self._csv_widget = _CsvSourceWidget(self)
+        self._kma_widget = _KmaSourceWidget(self)
+        self._khoa_widget = _KhoaSourceWidget(self)
+        self.source_tabs.addTab(self._csv_widget, "CSV 파일")
+        self.source_tabs.addTab(self._kma_widget, "KMA API (기상청)")
+        self.source_tabs.addTab(self._khoa_widget, "KHOA API (해양조사원)")
+        layout.addWidget(self.source_tabs)
+
+        # --- Shared: Status ---
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        # --- Shared: Data preview ---
+        self.preview = QTableWidget()
+        self.preview.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.preview.setAlternatingRowColors(True)
+        layout.addWidget(self.preview, stretch=1)
+
+    # --- Shared finalization (called by both source widgets) ---
+
+    def finalize_data(self, df: pd.DataFrame, source_label: str):
+        """Validate, store, preview, and unlock downstream tabs."""
+        ok, msg = validate_metocean(df)
+        if not ok:
+            QMessageBox.critical(
+                self, "Validation Failed",
+                f"{msg}\n\n"
+                f"Required: DatetimeIndex + 'Hs' (0-20m) + 'Wind' (0-70m/s) columns, "
+                f"minimum 24 records, less than 50% missing values."
+            )
+            return
+
+        interval = get_time_interval_minutes(df)
+        self.mw.df = df
+        self.mw.interval_min = interval
+
+        # Build status text with missing-data warning
+        hs_nan = df["Hs"].isna().sum()
+        wind_nan = df["Wind"].isna().sum()
+        total = len(df)
+        status = (
+            f"<b style='color:green'>OK</b> — {source_label} | "
+            f"{total:,} records | {interval}-min interval | "
+            f"{df.index.min().date()} to {df.index.max().date()}"
+        )
+        if hs_nan > 0 or wind_nan > 0:
+            pct_hs = hs_nan / total * 100
+            pct_wind = wind_nan / total * 100
+            parts = []
+            if hs_nan > 0:
+                parts.append(f"Hs {hs_nan:,}건({pct_hs:.1f}%)")
+            if wind_nan > 0:
+                parts.append(f"Wind {wind_nan:,}건({pct_wind:.1f}%)")
+            status += (
+                f"<br><span style='color:#cc6600'>⚠ 결측 데이터: "
+                f"{', '.join(parts)} — 결측 구간은 시뮬레이션에서 작업 가능으로 처리됩니다 "
+                f"(NA handling: permissive)</span>"
+            )
+
+        self.status_label.setText(status)
+        self._show_preview(df)
+        self.mw.unlock_after_data_loaded()
+        self.mw.statusBar().showMessage(
+            f"Data loaded: {source_label} — Go to Tab 2 to configure tasks"
+        )
+
+    def _show_preview(self, df: pd.DataFrame, max_rows=200):
+        cols = list(df.columns)
+        self.preview.setColumnCount(len(cols) + 1)
+        self.preview.setHorizontalHeaderLabels(["Timestamp"] + cols)
+        n = min(len(df), max_rows)
+        self.preview.setRowCount(n)
+        for i in range(n):
+            self.preview.setItem(i, 0, QTableWidgetItem(str(df.index[i])))
+            for j, col in enumerate(cols):
+                val = df.iloc[i, j]
+                text = f"{val:.3f}" if isinstance(val, float) else str(val)
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.preview.setItem(i, j + 1, item)
+        self.preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+
+# --- CSV Source Sub-widget ---
+
+class _CsvSourceWidget(QWidget):
+    """CSV file loading panel (sub-tab of DataTab)."""
+
+    def __init__(self, data_tab: DataTab):
+        super().__init__()
+        self.data_tab = data_tab
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
         layout.addWidget(_guide(
             "Select a CSV file containing historical wave height (Hs) and wind speed data. "
             "Supported formats: General CSV (with 'timestamp', 'Hs', 'Wind' columns) "
             "or ERA5 Hindcast CSV (auto-detected)."
         ))
 
-        # --- File selection ---
+        # File selection
         file_group = QGroupBox("CSV File")
         fg = QHBoxLayout(file_group)
         self.path_edit = QLineEdit()
@@ -94,7 +201,7 @@ class DataTab(QWidget):
         fg.addWidget(btn_browse)
         layout.addWidget(file_group)
 
-        # --- Options row ---
+        # Options row
         opts = QHBoxLayout()
         opts.addWidget(QLabel("Format:"))
         self.csv_type_combo = QComboBox()
@@ -138,18 +245,7 @@ class DataTab(QWidget):
         opts.addWidget(btn_example)
         layout.addLayout(opts)
 
-        # --- Status ---
-        self.status_label = QLabel("")
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
-
-        # --- Data preview ---
-        self.preview = QTableWidget()
-        self.preview.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.preview.setAlternatingRowColors(True)
-        layout.addWidget(self.preview, stretch=1)
-
-        # --- CSV format help ---
+        # CSV format help
         help_label = QLabel(
             "<b>General CSV example:</b><br>"
             "<code>timestamp,Hs,Wind<br>"
@@ -194,34 +290,11 @@ class DataTab(QWidget):
             )
             return
 
-        ok, msg = validate_metocean(df)
-        if not ok:
-            QMessageBox.critical(
-                self, "Validation Failed",
-                f"{msg}\n\n"
-                f"Required: DatetimeIndex + 'Hs' (0-20m) + 'Wind' (0-70m/s) columns, "
-                f"minimum 24 records, less than 50% missing values."
-            )
-            return
-
-        interval = get_time_interval_minutes(df)
-        self.mw.df = df
-        self.mw.interval_min = interval
-        self.status_label.setText(
-            f"<b style='color:green'>OK</b> — {len(df):,} records | "
-            f"{interval}-min interval | "
-            f"{df.index.min().date()} to {df.index.max().date()}"
-        )
-        self._show_preview(df)
-        self.mw.unlock_after_data_loaded()
-        self.mw.statusBar().showMessage(
-            f"Data loaded: {os.path.basename(path)} — Go to Tab 2 to configure tasks"
-        )
+        self.data_tab.finalize_data(df, os.path.basename(path))
 
     def _load_example(self):
         """Load bundled example data and config."""
         import sys
-        # Resolve the examples directory relative to the package
         if getattr(sys, "frozen", False):
             base = os.path.join(sys._MEIPASS, "examples")
         else:
@@ -247,16 +320,17 @@ class DataTab(QWidget):
             return
 
         interval = get_time_interval_minutes(df)
-        self.mw.df = df
-        self.mw.interval_min = interval
+        mw = self.data_tab.mw
+        mw.df = df
+        mw.interval_min = interval
         self.path_edit.setText(csv_path)
-        self.status_label.setText(
+        self.data_tab.status_label.setText(
             f"<b style='color:green'>Example loaded</b> — {len(df):,} records | "
             f"{interval}-min interval | "
             f"{df.index.min().date()} to {df.index.max().date()}"
         )
-        self._show_preview(df)
-        self.mw.unlock_after_data_loaded()
+        self.data_tab._show_preview(df)
+        mw.unlock_after_data_loaded()
 
         # Also load example config if available
         if os.path.isfile(config_path):
@@ -264,33 +338,447 @@ class DataTab(QWidget):
                 with open(config_path, encoding="utf-8") as f:
                     data = json.load(f)
                 if "tasks" in data:
-                    self.mw.config_tab.task_table.load_tasks(data["tasks"])
+                    mw.config_tab.task_table.load_tasks(data["tasks"])
                 if "n_sims" in data:
-                    self.mw.config_tab.n_sims_spin.setValue(data["n_sims"])
+                    mw.config_tab.n_sims_spin.setValue(data["n_sims"])
                 if "pvals" in data:
-                    self.mw.config_tab.pvals_edit.setText(",".join(str(p) for p in data["pvals"]))
+                    mw.config_tab.pvals_edit.setText(",".join(str(p) for p in data["pvals"]))
             except Exception:
-                pass  # Config is optional, data loading is the critical part
+                pass
 
-        self.mw.statusBar().showMessage(
+        mw.statusBar().showMessage(
             "Example data and config loaded — Go to Tab 2 to review, then Tab 3 to run"
         )
 
-    def _show_preview(self, df: pd.DataFrame, max_rows=200):
-        cols = list(df.columns)
-        self.preview.setColumnCount(len(cols) + 1)
-        self.preview.setHorizontalHeaderLabels(["Timestamp"] + cols)
-        n = min(len(df), max_rows)
-        self.preview.setRowCount(n)
-        for i in range(n):
-            self.preview.setItem(i, 0, QTableWidgetItem(str(df.index[i])))
-            for j, col in enumerate(cols):
-                val = df.iloc[i, j]
-                text = f"{val:.3f}" if isinstance(val, float) else str(val)
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.preview.setItem(i, j + 1, item)
-        self.preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+# --- KMA API Source Sub-widget ---
+
+class _KmaSourceWidget(QWidget):
+    """KMA API data fetching panel (sub-tab of DataTab)."""
+
+    _SETTINGS_KEY = "kma_api_key"
+
+    def __init__(self, data_tab: DataTab):
+        super().__init__()
+        self.data_tab = data_tab
+        self._worker = None
+        self._settings = QSettings("PValue", "MarinePValueSimulator")
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(_guide(
+            "기상청 API Hub에서 해양기상부이/등표/기상1호 관측 데이터를 자동으로 가져옵니다. "
+            "API 인증키는 apihub.kma.go.kr에서 무료 발급 가능합니다."
+        ))
+
+        # API Key
+        key_group = QGroupBox("API 인증키")
+        kg = QHBoxLayout(key_group)
+        self.key_edit = QLineEdit()
+        self.key_edit.setPlaceholderText("API Hub 인증키 입력...")
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        saved_key = self._settings.value(self._SETTINGS_KEY, "")
+        if saved_key:
+            self.key_edit.setText(saved_key)
+        self.key_show_btn = QPushButton("표시")
+        self.key_show_btn.setCheckable(True)
+        self.key_show_btn.setMaximumWidth(50)
+        self.key_show_btn.toggled.connect(
+            lambda on: self.key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        btn_save_key = QPushButton("저장")
+        btn_save_key.setMaximumWidth(50)
+        btn_save_key.setToolTip("인증키를 로컬에 저장 (다음 실행 시 자동 입력)")
+        btn_save_key.clicked.connect(self._save_key)
+        kg.addWidget(self.key_edit, stretch=1)
+        kg.addWidget(self.key_show_btn)
+        kg.addWidget(btn_save_key)
+        layout.addWidget(key_group)
+
+        # Station selection
+        stn_group = QGroupBox("관측소 선택")
+        sg = QHBoxLayout(stn_group)
+
+        sg.addWidget(QLabel("관측 유형:"))
+        self.type_combo = QComboBox()
+        for stype, info in STATION_TYPES.items():
+            self.type_combo.addItem(info["label"], stype)
+        self.type_combo.currentIndexChanged.connect(self._update_stations)
+        sg.addWidget(self.type_combo)
+
+        sg.addSpacing(10)
+        sg.addWidget(QLabel("관측소:"))
+        self.station_combo = QComboBox()
+        self.station_combo.setMinimumWidth(200)
+        sg.addWidget(self.station_combo, stretch=1)
+        layout.addWidget(stn_group)
+
+        # Date range
+        date_group = QGroupBox("조회 기간")
+        dg = QHBoxLayout(date_group)
+        dg.addWidget(QLabel("시작:"))
+        self.date_start = QDateEdit()
+        self.date_start.setCalendarPopup(True)
+        self.date_start.setDate(QDate.currentDate().addYears(-3))
+        self.date_start.setDisplayFormat("yyyy-MM-dd")
+        dg.addWidget(self.date_start)
+
+        dg.addSpacing(10)
+        dg.addWidget(QLabel("종료:"))
+        self.date_end = QDateEdit()
+        self.date_end.setCalendarPopup(True)
+        self.date_end.setDate(QDate.currentDate())
+        self.date_end.setDisplayFormat("yyyy-MM-dd")
+        dg.addWidget(self.date_end)
+
+        dg.addStretch()
+
+        self.btn_fetch = QPushButton("Fetch Data")
+        self.btn_fetch.setObjectName("primary")
+        self.btn_fetch.clicked.connect(self._fetch)
+        dg.addWidget(self.btn_fetch)
+
+        self.btn_save_csv = QPushButton("Save CSV")
+        self.btn_save_csv.setToolTip("가져온 데이터를 CSV 파일로 저장")
+        self.btn_save_csv.setEnabled(False)
+        self.btn_save_csv.clicked.connect(self._save_csv)
+        dg.addWidget(self.btn_save_csv)
+        layout.addWidget(date_group)
+
+        # Progress
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        self.fetch_status = QLabel("")
+        self.fetch_status.setWordWrap(True)
+        layout.addWidget(self.fetch_status)
+
+        layout.addStretch()
+
+        # Populate station combo
+        self._update_stations()
+
+        # Store fetched df for CSV save
+        self._fetched_df = None
+
+    def _save_key(self):
+        key = self.key_edit.text().strip()
+        self._settings.setValue(self._SETTINGS_KEY, key)
+        self.fetch_status.setText("<b style='color:green'>인증키 저장 완료</b>")
+
+    def _update_stations(self):
+        """Populate station combo based on selected type."""
+        self.station_combo.clear()
+        stype = self.type_combo.currentData()
+        if not stype:
+            return
+        stations = ALL_STATIONS.get(stype, {})
+        for stn_id, name in sorted(stations.items(), key=lambda x: x[0]):
+            self.station_combo.addItem(f"{name} ({stn_id})", stn_id)
+
+    def _fetch(self):
+        api_key = self.key_edit.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "Warning", "API 인증키를 입력해주세요.")
+            return
+
+        stype = self.type_combo.currentData()
+        station_id = self.station_combo.currentData()
+        if not station_id:
+            QMessageBox.warning(self, "Warning", "관측소를 선택해주세요.")
+            return
+
+        qstart = self.date_start.date()
+        qend = self.date_end.date()
+        start = datetime(qstart.year(), qstart.month(), qstart.day())
+        end = datetime(qend.year(), qend.month(), qend.day(), 23, 59)
+
+        if end <= start:
+            QMessageBox.warning(self, "Warning", "종료일이 시작일보다 뒤여야 합니다.")
+            return
+
+        # Disable UI during fetch
+        self.btn_fetch.setEnabled(False)
+        self.btn_fetch.setText("수신 중...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.fetch_status.setText("")
+        self._fetched_df = None
+        self.btn_save_csv.setEnabled(False)
+
+        self._worker = KmaFetchWorker(api_key, stype, station_id, start, end, parent=self)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.status.connect(self._on_status)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _on_progress(self, current, total):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+
+    def _on_status(self, msg):
+        self.fetch_status.setText(msg)
+
+    def _on_finished(self, df):
+        self.btn_fetch.setEnabled(True)
+        self.btn_fetch.setText("Fetch Data")
+        self.progress_bar.setVisible(False)
+        self._fetched_df = df
+        self.btn_save_csv.setEnabled(True)
+
+        stype = self.type_combo.currentData()
+        station_id = self.station_combo.currentData()
+        label = get_station_label(stype, station_id)
+        self.fetch_status.setText(
+            f"<b style='color:green'>수신 완료</b> — {label} | {len(df):,}건 | "
+            f"{df.index.min().date()} ~ {df.index.max().date()}<br>"
+            f"<span style='color:#cc6600'>⚠ API 데이터는 파고(Hs) 소수점 1자리 정밀도로 제공됩니다 "
+            f"(P값 차이 ~1% 이내)</span>"
+        )
+
+        # Finalize: validate and load into program
+        self.data_tab.finalize_data(df, f"KMA API: {label}")
+
+    def _on_error(self, msg):
+        self.btn_fetch.setEnabled(True)
+        self.btn_fetch.setText("Fetch Data")
+        self.progress_bar.setVisible(False)
+        self.fetch_status.setText(f"<b style='color:red'>오류</b> — {msg}")
+        QMessageBox.critical(self, "API Error", msg)
+
+    def _save_csv(self):
+        if self._fetched_df is None:
+            return
+        stype = self.type_combo.currentData()
+        station_id = self.station_combo.currentData()
+        label = get_station_label(stype, station_id)
+        name = label.split("(")[0].strip().replace(" ", "_")
+        df = self._fetched_df
+        start = df.index.min().strftime("%y%m")
+        end = df.index.max().strftime("%y%m")
+        default_name = f"{name}_{start}_{end}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Save CSV", default_name, "CSV (*.csv)")
+        if not path:
+            return
+        out = df.copy()
+        out.index.name = "timestamp"
+        out.to_csv(path)
+        self.fetch_status.setText(
+            f"<b style='color:green'>CSV 저장 완료</b> — {os.path.basename(path)}"
+        )
+
+
+# --- KHOA API Source Sub-widget ---
+
+class _KhoaSourceWidget(QWidget):
+    """KHOA API data fetching panel (sub-tab of DataTab)."""
+
+    _SETTINGS_KEY = "khoa_api_key"
+
+    def __init__(self, data_tab: DataTab):
+        super().__init__()
+        self.data_tab = data_tab
+        self._worker = None
+        self._settings = QSettings("PValue", "MarinePValueSimulator")
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(_guide(
+            "국립해양조사원(KHOA) 해양관측부이 데이터를 공공데이터포털(data.go.kr)에서 가져옵니다.\n"
+            "⚠ API 데이터는 파고(Hs) 소수점 1자리 정밀도로 제공됩니다 (P값 차이 ~1% 이내). "
+            "고정밀(소수 2자리) 데이터가 필요하면 KHOA 홈페이지에서 CSV를 다운받아 사용하세요."
+        ))
+
+        # API Key
+        key_group = QGroupBox("API 인증키 (공공데이터포털)")
+        kg = QHBoxLayout(key_group)
+        self.key_edit = QLineEdit()
+        self.key_edit.setPlaceholderText("data.go.kr 인증키 입력...")
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        saved_key = self._settings.value(self._SETTINGS_KEY, "")
+        if saved_key:
+            self.key_edit.setText(saved_key)
+        self.key_show_btn = QPushButton("표시")
+        self.key_show_btn.setCheckable(True)
+        self.key_show_btn.setMaximumWidth(50)
+        self.key_show_btn.toggled.connect(
+            lambda on: self.key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        btn_save_key = QPushButton("저장")
+        btn_save_key.setMaximumWidth(50)
+        btn_save_key.setToolTip("인증키를 로컬에 저장 (다음 실행 시 자동 입력)")
+        btn_save_key.clicked.connect(self._save_key)
+        kg.addWidget(self.key_edit, stretch=1)
+        kg.addWidget(self.key_show_btn)
+        kg.addWidget(btn_save_key)
+        layout.addWidget(key_group)
+
+        # Station selection
+        stn_group = QGroupBox("관측소 선택")
+        sg = QHBoxLayout(stn_group)
+        sg.addWidget(QLabel("관측소:"))
+        self.station_combo = QComboBox()
+        self.station_combo.setMinimumWidth(250)
+        for obs_code, name in sorted(KHOA_STATIONS.items(), key=lambda x: x[0]):
+            self.station_combo.addItem(f"{name} ({obs_code})", obs_code)
+        sg.addWidget(self.station_combo, stretch=1)
+        layout.addWidget(stn_group)
+
+        # Date range
+        date_group = QGroupBox("조회 기간")
+        dg = QHBoxLayout(date_group)
+        dg.addWidget(QLabel("시작:"))
+        self.date_start = QDateEdit()
+        self.date_start.setCalendarPopup(True)
+        self.date_start.setDate(QDate.currentDate().addYears(-3))
+        self.date_start.setDisplayFormat("yyyy-MM-dd")
+        dg.addWidget(self.date_start)
+
+        dg.addSpacing(10)
+        dg.addWidget(QLabel("종료:"))
+        self.date_end = QDateEdit()
+        self.date_end.setCalendarPopup(True)
+        self.date_end.setDate(QDate.currentDate())
+        self.date_end.setDisplayFormat("yyyy-MM-dd")
+        dg.addWidget(self.date_end)
+
+        dg.addStretch()
+
+        self.btn_fetch = QPushButton("Fetch Data")
+        self.btn_fetch.setObjectName("primary")
+        self.btn_fetch.clicked.connect(self._fetch)
+        dg.addWidget(self.btn_fetch)
+
+        self.btn_save_csv = QPushButton("Save CSV")
+        self.btn_save_csv.setToolTip("가져온 데이터를 CSV 파일로 저장")
+        self.btn_save_csv.setEnabled(False)
+        self.btn_save_csv.clicked.connect(self._save_csv)
+        dg.addWidget(self.btn_save_csv)
+        layout.addWidget(date_group)
+
+        # Progress
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        self.fetch_status = QLabel("")
+        self.fetch_status.setWordWrap(True)
+        layout.addWidget(self.fetch_status)
+
+        layout.addStretch()
+        self._fetched_df = None
+
+    def _save_key(self):
+        key = self.key_edit.text().strip()
+        self._settings.setValue(self._SETTINGS_KEY, key)
+        self.fetch_status.setText("<b style='color:green'>인증키 저장 완료</b>")
+
+    def _fetch(self):
+        service_key = self.key_edit.text().strip()
+        if not service_key:
+            QMessageBox.warning(self, "Warning", "API 인증키를 입력해주세요.")
+            return
+
+        obs_code = self.station_combo.currentData()
+        if not obs_code:
+            QMessageBox.warning(self, "Warning", "관측소를 선택해주세요.")
+            return
+
+        qstart = self.date_start.date()
+        qend = self.date_end.date()
+        start = datetime(qstart.year(), qstart.month(), qstart.day())
+        end = datetime(qend.year(), qend.month(), qend.day(), 23, 59)
+
+        if end <= start:
+            QMessageBox.warning(self, "Warning", "종료일이 시작일보다 뒤여야 합니다.")
+            return
+
+        # Warn about long date ranges
+        days = (end - start).days
+        if days > 365:
+            reply = QMessageBox.question(
+                self, "장기간 조회",
+                f"조회 기간이 {days}일입니다. 하루 단위로 API를 호출하므로 "
+                f"시간이 오래 걸릴 수 있습니다.\n계속하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self.btn_fetch.setEnabled(False)
+        self.btn_fetch.setText("수신 중...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.fetch_status.setText("")
+        self._fetched_df = None
+        self.btn_save_csv.setEnabled(False)
+
+        self._worker = KhoaFetchWorker(service_key, obs_code, start, end, parent=self)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.status.connect(self._on_status)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _on_progress(self, current, total):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+
+    def _on_status(self, msg):
+        self.fetch_status.setText(msg)
+
+    def _on_finished(self, df):
+        self.btn_fetch.setEnabled(True)
+        self.btn_fetch.setText("Fetch Data")
+        self.progress_bar.setVisible(False)
+        self._fetched_df = df
+        self.btn_save_csv.setEnabled(True)
+
+        obs_code = self.station_combo.currentData()
+        label = khoa_get_station_label(obs_code)
+        self.fetch_status.setText(
+            f"<b style='color:green'>수신 완료</b> — {label} | {len(df):,}건 | "
+            f"{df.index.min().date()} ~ {df.index.max().date()}<br>"
+            f"<span style='color:#cc6600'>⚠ API 데이터는 파고(Hs) 소수점 1자리 정밀도로 제공됩니다 "
+            f"(P값 차이 ~1% 이내)</span>"
+        )
+
+        self.data_tab.finalize_data(df, f"KHOA API: {label}")
+
+    def _on_error(self, msg):
+        self.btn_fetch.setEnabled(True)
+        self.btn_fetch.setText("Fetch Data")
+        self.progress_bar.setVisible(False)
+        self.fetch_status.setText(f"<b style='color:red'>오류</b> — {msg}")
+        QMessageBox.critical(self, "API Error", msg)
+
+    def _save_csv(self):
+        if self._fetched_df is None:
+            return
+        from pvalue.khoa import get_station_label as khoa_label, KHOA_STATIONS
+        obs_code = self.station_combo.currentData()
+        name = KHOA_STATIONS.get(obs_code, obs_code).replace(" ", "_")
+        df = self._fetched_df
+        start = df.index.min().strftime("%y%m")
+        end = df.index.max().strftime("%y%m")
+        default_name = f"{name}_{start}_{end}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Save CSV", default_name, "CSV (*.csv)")
+        if not path:
+            return
+        out = df.copy()
+        out.index.name = "timestamp"
+        out.to_csv(path)
+        self.fetch_status.setText(
+            f"<b style='color:green'>CSV 저장 완료</b> — {os.path.basename(path)}"
+        )
 
 
 # =====================================================================
@@ -498,68 +986,57 @@ class ConfigTab(QWidget):
             else:
                 QMessageBox.warning(self, "Warning", "JSON file has no 'tasks' key.")
                 return
-            if "n_sims" in data:
-                self.n_sims_spin.setValue(data["n_sims"])
-            if "pvals" in data:
-                self.pvals_edit.setText(",".join(str(p) for p in data["pvals"]))
-            if "seed" in data:
-                self.seed_spin.setValue(data["seed"])
+            # Always reset all fields to defaults first, then apply JSON values.
+            # This prevents stale state when importing a JSON that omits some fields.
+            self.n_sims_spin.setValue(data.get("n_sims", 1000))
+            self.pvals_edit.setText(",".join(str(p) for p in data.get("pvals", [50, 75, 90])))
+            self.seed_spin.setValue(data.get("seed", 7))
 
-            # Split mode
-            if "split_mode" in data:
-                if data["split_mode"]:
-                    self.radio_split.setChecked(True)
-                else:
-                    self.radio_continuous.setChecked(True)
+            # Split mode (default: continuous)
+            if data.get("split_mode", False):
+                self.radio_split.setChecked(True)
+            else:
+                self.radio_continuous.setChecked(True)
 
-            # NA handling
-            if "na_handling" in data:
-                if data["na_handling"] == "conservative":
-                    self.radio_conservative.setChecked(True)
-                else:
-                    self.radio_permissive.setChecked(True)
+            # NA handling (default: permissive)
+            if data.get("na_handling", "permissive") == "conservative":
+                self.radio_conservative.setChecked(True)
+            else:
+                self.radio_permissive.setChecked(True)
 
-            # Start month
-            if "start_month" in data and data["start_month"] is not None:
+            # Start month (default: None / unchecked)
+            if data.get("start_month") is not None:
                 self.month_check.setChecked(True)
                 self.month_combo.setCurrentText(str(data["start_month"]))
             else:
                 self.month_check.setChecked(False)
 
-            # Calendar / business hours
-            cal = data.get("calendar", ["all"])
-            if isinstance(cal, list) and len(cal) >= 1 and cal[0] == "custom" and len(cal) >= 3:
+            # Calendar / business hours (default: unchecked, 8-18)
+            cal_applied = False
+            cal = data.get("calendar")
+            if isinstance(cal, list) and len(cal) >= 3:
                 hours_str = cal[2]
                 try:
                     sh, eh = map(int, str(hours_str).split("-"))
-                    self.cal_check.setChecked(True)
                     self.cal_start.setValue(sh)
                     self.cal_end.setValue(eh)
+                    self.cal_check.setChecked(cal[0] == "custom")
+                    cal_applied = True
                 except ValueError:
-                    self.cal_check.setChecked(False)
-            elif isinstance(cal, list) and len(cal) >= 3 and cal[0] == "all":
-                # "all" mode but hours info present — show in UI but calendar not enforced
-                hours_str = cal[2] if len(cal) >= 3 else None
-                if hours_str:
-                    try:
-                        sh, eh = map(int, str(hours_str).split("-"))
-                        self.cal_check.setChecked(False)
-                        self.cal_start.setValue(sh)
-                        self.cal_end.setValue(eh)
-                    except ValueError:
-                        self.cal_check.setChecked(False)
-                else:
-                    self.cal_check.setChecked(False)
-            else:
-                self.cal_check.setChecked(False)
+                    pass
 
-            # calendar_hours (refactored format)
-            if "calendar_hours" in data and data["calendar_hours"] is not None:
-                ch = data["calendar_hours"]
-                if isinstance(ch, (list, tuple)) and len(ch) == 2:
-                    self.cal_check.setChecked(True)
-                    self.cal_start.setValue(ch[0])
-                    self.cal_end.setValue(ch[1])
+            # calendar_hours (refactored format) — takes precedence
+            ch = data.get("calendar_hours")
+            if isinstance(ch, (list, tuple)) and len(ch) == 2:
+                self.cal_check.setChecked(True)
+                self.cal_start.setValue(ch[0])
+                self.cal_end.setValue(ch[1])
+                cal_applied = True
+
+            if not cal_applied:
+                self.cal_check.setChecked(False)
+                self.cal_start.setValue(8)
+                self.cal_end.setValue(18)
 
             self.mw.statusBar().showMessage(f"Config imported from {os.path.basename(path)}")
         except Exception as exc:
