@@ -162,9 +162,14 @@ def _csv_source(key_prefix):
 
     try:
         df = load_csv(tmp_path, csv_type, start_date, end_date)
-    except ValueError as exc:
+    except Exception as exc:
         st.error(f"Failed to load CSV: {exc}")
         return None, csv_type
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
     return _validate_and_show(df, key_prefix)
 
@@ -347,7 +352,13 @@ def task_editor(key_prefix="main"):
     month_opt = c4.selectbox("Start month", ["Any"] + [str(m) for m in range(1, 13)], key=f"{key_prefix}_month")
     start_month = None if month_opt == "Any" else int(month_opt)
     pvals_str = c5.text_input("Percentiles (comma-separated)", "50,75,90", key=f"{key_prefix}_pv")
-    pvals = [int(x.strip()) for x in pvals_str.split(",")]
+    try:
+        pvals = [int(x.strip()) for x in pvals_str.split(",") if x.strip()]
+        if not pvals or any(not 0 <= p <= 100 for p in pvals):
+            raise ValueError
+    except (ValueError, TypeError):
+        st.warning("Percentiles 형식 오류 — 기본값 [50, 75, 90] 사용")
+        pvals = [50, 75, 90]
 
     return SimulationConfig(
         tasks=tasks, n_sims=n_sims, start_month=start_month,
@@ -381,14 +392,19 @@ def page_simulation():
         def _cb(current, total):
             progress.progress(current / total, text=f"Simulation {current}/{total}")
 
-        res = simulate_campaign(
-            df, config.tasks,
-            n_sims=config.n_sims, start_month=config.start_month,
-            calendar_mask_fn=config.build_calendar_mask_fn(),
-            split_mode=config.split_mode, time_interval_min=interval,
-            na_handling=config.na_handling, seed=config.seed,
-            progress_callback=_cb,
-        )
+        try:
+            res = simulate_campaign(
+                df, config.tasks,
+                n_sims=config.n_sims, start_month=config.start_month,
+                calendar_mask_fn=config.build_calendar_mask_fn(),
+                split_mode=config.split_mode, time_interval_min=interval,
+                na_handling=config.na_handling, seed=config.seed,
+                progress_callback=_cb,
+            )
+        except (RuntimeError, ValueError) as exc:
+            progress.empty()
+            st.error(f"시뮬레이션 오류: {exc}\n\n임계값을 완화하거나 데이터 기간을 늘려보세요.")
+            return
         progress.empty()
 
         summary = summarize_pxx(res, config.pvals)
@@ -447,7 +463,9 @@ def page_batch():
                 interval = get_time_interval_minutes(df)
                 res = simulate_campaign(
                     df, config.tasks, n_sims=config.n_sims,
-                    start_month=config.start_month, split_mode=config.split_mode,
+                    start_month=config.start_month,
+                    calendar_mask_fn=config.build_calendar_mask_fn(),
+                    split_mode=config.split_mode,
                     time_interval_min=interval, na_handling=config.na_handling,
                     seed=config.seed,
                 )
@@ -456,6 +474,11 @@ def page_batch():
                 all_results[name] = {"results": res, "summary": summary}
             except Exception as exc:
                 st.error(f"{f.name}: {exc}")
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
             progress.progress((idx + 1) / len(files))
 
@@ -496,20 +519,27 @@ def page_optimal_month():
         rows = []
         progress = st.progress(0)
 
-        for month in range(1, 13):
-            res = simulate_campaign(
-                df, config.tasks,
-                n_sims=max(500, config.n_sims // 2),
-                start_month=month, split_mode=config.split_mode,
-                time_interval_min=interval, na_handling=config.na_handling,
-                seed=config.seed,
-            )
-            rows.append({
-                "Month": month,
-                "P90 (days)": float(np.percentile(res["elapsed_days"], 90)),
-                "Mean (days)": float(res["elapsed_days"].mean()),
-            })
-            progress.progress(month / 12)
+        try:
+            for month in range(1, 13):
+                res = simulate_campaign(
+                    df, config.tasks,
+                    n_sims=max(500, config.n_sims // 2),
+                    start_month=month,
+                    calendar_mask_fn=config.build_calendar_mask_fn(),
+                    split_mode=config.split_mode,
+                    time_interval_min=interval, na_handling=config.na_handling,
+                    seed=config.seed,
+                )
+                rows.append({
+                    "Month": month,
+                    "P90 (days)": float(np.percentile(res["elapsed_days"], 90)),
+                    "Mean (days)": float(res["elapsed_days"].mean()),
+                })
+                progress.progress(month / 12)
+        except (RuntimeError, ValueError) as exc:
+            progress.empty()
+            st.error(f"시뮬레이션 오류: {exc}")
+            return
 
         progress.empty()
         result_df = pd.DataFrame(rows)

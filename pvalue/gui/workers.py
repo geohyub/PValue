@@ -91,6 +91,7 @@ class KmaFetchWorker(QThread):
         self.station_id = station_id
         self._start_dt = start
         self._end_dt = end
+        self._cancelled = False
 
     def run(self):
         from pvalue.kma import fetch_timeseries, get_station_label
@@ -98,18 +99,30 @@ class KmaFetchWorker(QThread):
         label = get_station_label(self.stype, self.station_id)
         self.status.emit(f"{label} 데이터 수신 중...")
         try:
+            def _progress(cur, total):
+                if self._cancelled:
+                    raise InterruptedError("Cancelled")
+                self.progress.emit(cur, total)
+
             df = fetch_timeseries(
                 self.api_key,
                 self.stype,
                 self.station_id,
                 self._start_dt,
                 self._end_dt,
-                progress_callback=lambda cur, total: self.progress.emit(cur, total),
+                progress_callback=_progress,
             )
-            self.status.emit(f"완료 — {len(df):,}건 수신")
-            self.finished.emit(df)
+            if not self._cancelled:
+                self.status.emit(f"완료 — {len(df):,}건 수신")
+                self.finished.emit(df)
+        except InterruptedError:
+            self.status.emit("취소됨")
         except Exception as exc:
-            self.error.emit(str(exc))
+            if not self._cancelled:
+                self.error.emit(str(exc))
+
+    def cancel(self):
+        self._cancelled = True
 
 
 class KhoaFetchWorker(QThread):
@@ -133,6 +146,7 @@ class KhoaFetchWorker(QThread):
         self.obs_code = obs_code
         self._start_dt = start
         self._end_dt = end
+        self._cancelled = False
 
     def run(self):
         from pvalue.khoa import fetch_timeseries, get_station_label
@@ -140,17 +154,29 @@ class KhoaFetchWorker(QThread):
         label = get_station_label(self.obs_code)
         self.status.emit(f"{label} 데이터 수신 중...")
         try:
+            def _progress(cur, total):
+                if self._cancelled:
+                    raise InterruptedError("Cancelled")
+                self.progress.emit(cur, total)
+
             df = fetch_timeseries(
                 self.service_key,
                 self.obs_code,
                 self._start_dt,
                 self._end_dt,
-                progress_callback=lambda cur, total: self.progress.emit(cur, total),
+                progress_callback=_progress,
             )
-            self.status.emit(f"완료 — {len(df):,}건 수신")
-            self.finished.emit(df)
+            if not self._cancelled:
+                self.status.emit(f"완료 — {len(df):,}건 수신")
+                self.finished.emit(df)
+        except InterruptedError:
+            self.status.emit("취소됨")
         except Exception as exc:
-            self.error.emit(str(exc))
+            if not self._cancelled:
+                self.error.emit(str(exc))
+
+    def cancel(self):
+        self._cancelled = True
 
 
 class OptimalMonthWorker(QThread):
@@ -171,17 +197,22 @@ class OptimalMonthWorker(QThread):
         self.df = df
         self.config = config
         self.interval_min = interval_min
+        self._cancelled = False
 
     def run(self):
         try:
             rows = []
+            cal_mask_fn = self.config.build_calendar_mask_fn()
             for month in range(1, 13):
+                if self._cancelled:
+                    return
                 self.progress.emit(month)
                 res = simulate_campaign(
                     self.df,
                     self.config.tasks,
                     n_sims=max(500, self.config.n_sims // 2),
                     start_month=month,
+                    calendar_mask_fn=cal_mask_fn,
                     split_mode=self.config.split_mode,
                     time_interval_min=self.interval_min,
                     na_handling=self.config.na_handling,
@@ -195,9 +226,15 @@ class OptimalMonthWorker(QThread):
                     }
                 )
 
+            if self._cancelled:
+                return
             result_df = pd.DataFrame(rows)
             optimal = int(result_df.loc[result_df["P90_days"].idxmin(), "Month"])
             self.finished.emit(result_df, optimal)
 
         except Exception as exc:
-            self.error.emit(str(exc))
+            if not self._cancelled:
+                self.error.emit(str(exc))
+
+    def cancel(self):
+        self._cancelled = True

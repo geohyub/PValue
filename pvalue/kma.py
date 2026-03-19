@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import urlopen
 
 import pandas as pd
@@ -180,8 +181,8 @@ def _parse_obs_text(text: str, stype: str) -> pd.DataFrame:
         except (ValueError, IndexError):
             continue
 
-        hs = wh_val if -90 < wh_val <= 30 else float("nan")
-        wind = ws_val if -90 < ws_val <= 80 else float("nan")
+        hs = wh_val if 0 <= wh_val <= 30 else float("nan")
+        wind = ws_val if 0 <= ws_val <= 80 else float("nan")
 
         try:
             dt = datetime.strptime(tm_str, "%Y%m%d%H%M")
@@ -267,7 +268,7 @@ def fetch_timeseries(
         tm2 = c_end.strftime("%Y%m%d%H%M")
         url = (
             f"{_BASE}{endpoint}"
-            f"?tm1={tm1}&tm2={tm2}&stn={station_id}&authKey={api_key}"
+            f"?tm1={tm1}&tm2={tm2}&stn={station_id}&authKey={quote(api_key, safe='')}"
         )
         text = _fetch_text(url)
         try:

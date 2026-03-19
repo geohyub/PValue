@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"Marine P-Value Simulator v{__version__}")
         self.resize(1200, 800)
+        self.setMinimumSize(900, 600)
         self.setStyleSheet(_STYLESHEET)
 
         # Shared state

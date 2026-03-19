@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import Qt, QDate, QSettings
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -105,6 +107,11 @@ class DataTab(QWidget):
         self.preview.setAlternatingRowColors(True)
         layout.addWidget(self.preview, stretch=1)
 
+        self.preview_note = QLabel("")
+        self.preview_note.setStyleSheet("color: #888; font-size: 11px; padding: 2px;")
+        self.preview_note.setVisible(False)
+        layout.addWidget(self.preview_note)
+
     # --- Shared finalization (called by both source widgets) ---
 
     def finalize_data(self, df: pd.DataFrame, source_label: str):
@@ -168,6 +175,12 @@ class DataTab(QWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.preview.setItem(i, j + 1, item)
         self.preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Show truncation notice
+        if len(df) > max_rows:
+            self.preview_note.setText(f"Showing first {n:,} of {len(df):,} records")
+            self.preview_note.setVisible(True)
+        else:
+            self.preview_note.setVisible(False)
 
 
 # --- CSV Source Sub-widget ---
@@ -314,25 +327,11 @@ class _CsvSourceWidget(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to load example CSV:\n{exc}")
             return
 
-        ok, msg = validate_metocean(df)
-        if not ok:
-            QMessageBox.critical(self, "Validation", msg)
-            return
-
-        interval = get_time_interval_minutes(df)
-        mw = self.data_tab.mw
-        mw.df = df
-        mw.interval_min = interval
         self.path_edit.setText(csv_path)
-        self.data_tab.status_label.setText(
-            f"<b style='color:green'>Example loaded</b> — {len(df):,} records | "
-            f"{interval}-min interval | "
-            f"{df.index.min().date()} to {df.index.max().date()}"
-        )
-        self.data_tab._show_preview(df)
-        mw.unlock_after_data_loaded()
+        self.data_tab.finalize_data(df, "Example Data")
 
         # Also load example config if available
+        mw = self.data_tab.mw
         if os.path.isfile(config_path):
             try:
                 with open(config_path, encoding="utf-8") as f:
@@ -391,7 +390,7 @@ class _KmaSourceWidget(QWidget):
         )
         btn_save_key = QPushButton("저장")
         btn_save_key.setMaximumWidth(50)
-        btn_save_key.setToolTip("인증키를 로컬에 저장 (다음 실행 시 자동 입력)")
+        btn_save_key.setToolTip("인증키를 로컬에 저장 (Windows 레지스트리, 암호화 없음)")
         btn_save_key.clicked.connect(self._save_key)
         kg.addWidget(self.key_edit, stretch=1)
         kg.addWidget(self.key_show_btn)
@@ -440,6 +439,11 @@ class _KmaSourceWidget(QWidget):
         self.btn_fetch.setObjectName("primary")
         self.btn_fetch.clicked.connect(self._fetch)
         dg.addWidget(self.btn_fetch)
+
+        self.btn_cancel = QPushButton("취소")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._cancel_fetch)
+        dg.addWidget(self.btn_cancel)
 
         self.btn_save_csv = QPushButton("Save CSV")
         self.btn_save_csv.setToolTip("가져온 데이터를 CSV 파일로 저장")
@@ -501,9 +505,17 @@ class _KmaSourceWidget(QWidget):
             QMessageBox.warning(self, "Warning", "종료일이 시작일보다 뒤여야 합니다.")
             return
 
+        # Cancel previous fetch if running
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.finished.disconnect()
+            self._worker.error.disconnect()
+            self._worker.status.disconnect()
+            self._worker.cancel()
+
         # Disable UI during fetch
         self.btn_fetch.setEnabled(False)
         self.btn_fetch.setText("수신 중...")
+        self.btn_cancel.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.fetch_status.setText("")
@@ -524,9 +536,19 @@ class _KmaSourceWidget(QWidget):
     def _on_status(self, msg):
         self.fetch_status.setText(msg)
 
+    def _cancel_fetch(self):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.cancel()
+            self.btn_fetch.setEnabled(True)
+            self.btn_fetch.setText("Fetch Data")
+            self.btn_cancel.setEnabled(False)
+            self.progress_bar.setVisible(False)
+            self.fetch_status.setText("<b style='color:#cc6600'>수신 취소됨</b>")
+
     def _on_finished(self, df):
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Data")
+        self.btn_cancel.setEnabled(False)
         self.progress_bar.setVisible(False)
         self._fetched_df = df
         self.btn_save_csv.setEnabled(True)
@@ -547,9 +569,9 @@ class _KmaSourceWidget(QWidget):
     def _on_error(self, msg):
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Data")
+        self.btn_cancel.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.fetch_status.setText(f"<b style='color:red'>오류</b> — {msg}")
-        QMessageBox.critical(self, "API Error", msg)
 
     def _save_csv(self):
         if self._fetched_df is None:
@@ -614,7 +636,7 @@ class _KhoaSourceWidget(QWidget):
         )
         btn_save_key = QPushButton("저장")
         btn_save_key.setMaximumWidth(50)
-        btn_save_key.setToolTip("인증키를 로컬에 저장 (다음 실행 시 자동 입력)")
+        btn_save_key.setToolTip("인증키를 로컬에 저장 (Windows 레지스트리, 암호화 없음)")
         btn_save_key.clicked.connect(self._save_key)
         kg.addWidget(self.key_edit, stretch=1)
         kg.addWidget(self.key_show_btn)
@@ -656,6 +678,11 @@ class _KhoaSourceWidget(QWidget):
         self.btn_fetch.setObjectName("primary")
         self.btn_fetch.clicked.connect(self._fetch)
         dg.addWidget(self.btn_fetch)
+
+        self.btn_cancel = QPushButton("취소")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._cancel_fetch)
+        dg.addWidget(self.btn_cancel)
 
         self.btn_save_csv = QPushButton("Save CSV")
         self.btn_save_csv.setToolTip("가져온 데이터를 CSV 파일로 저장")
@@ -713,8 +740,16 @@ class _KhoaSourceWidget(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
+        # Cancel previous fetch if running
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.finished.disconnect()
+            self._worker.error.disconnect()
+            self._worker.status.disconnect()
+            self._worker.cancel()
+
         self.btn_fetch.setEnabled(False)
         self.btn_fetch.setText("수신 중...")
+        self.btn_cancel.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.fetch_status.setText("")
@@ -735,9 +770,19 @@ class _KhoaSourceWidget(QWidget):
     def _on_status(self, msg):
         self.fetch_status.setText(msg)
 
+    def _cancel_fetch(self):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.cancel()
+            self.btn_fetch.setEnabled(True)
+            self.btn_fetch.setText("Fetch Data")
+            self.btn_cancel.setEnabled(False)
+            self.progress_bar.setVisible(False)
+            self.fetch_status.setText("<b style='color:#cc6600'>수신 취소됨</b>")
+
     def _on_finished(self, df):
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Data")
+        self.btn_cancel.setEnabled(False)
         self.progress_bar.setVisible(False)
         self._fetched_df = df
         self.btn_save_csv.setEnabled(True)
@@ -756,9 +801,9 @@ class _KhoaSourceWidget(QWidget):
     def _on_error(self, msg):
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Data")
+        self.btn_cancel.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.fetch_status.setText(f"<b style='color:red'>오류</b> — {msg}")
-        QMessageBox.critical(self, "API Error", msg)
 
     def _save_csv(self):
         if self._fetched_df is None:
@@ -887,6 +932,10 @@ class ConfigTab(QWidget):
             "Work can be paused and resumed.\n"
             "Worked hours accumulate across multiple weather windows."
         )
+        # Explicit QButtonGroup to prevent cross-group interference
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self.radio_continuous)
+        self._mode_group.addButton(self.radio_split)
         col2.addWidget(self.radio_continuous)
         col2.addWidget(self.radio_split)
 
@@ -902,6 +951,9 @@ class ConfigTab(QWidget):
             "Missing data (NA) is treated as 'work blocked'.\n"
             "Use for worst-case planning."
         )
+        self._na_group = QButtonGroup(self)
+        self._na_group.addButton(self.radio_permissive)
+        self._na_group.addButton(self.radio_conservative)
         col2.addWidget(self.radio_permissive)
         col2.addWidget(self.radio_conservative)
         sg.addLayout(col2)
@@ -915,7 +967,12 @@ class ConfigTab(QWidget):
             "Useful if the campaign has a planned start season."
         )
         self.month_combo = QComboBox()
-        self.month_combo.addItems([str(m) for m in range(1, 13)])
+        _MONTH_LABELS = [
+            "1 - Jan", "2 - Feb", "3 - Mar", "4 - Apr", "5 - May", "6 - Jun",
+            "7 - Jul", "8 - Aug", "9 - Sep", "10 - Oct", "11 - Nov", "12 - Dec",
+        ]
+        for i, label in enumerate(_MONTH_LABELS, 1):
+            self.month_combo.addItem(label, i)
         self.month_combo.setEnabled(False)
         self.month_check.toggled.connect(self.month_combo.setEnabled)
         month_row.addWidget(self.month_check)
@@ -955,12 +1012,14 @@ class ConfigTab(QWidget):
             raise ValueError("At least one task is required.")
 
         try:
-            pvals = [int(x.strip()) for x in self.pvals_edit.text().split(",")]
+            pvals = [int(x.strip()) for x in self.pvals_edit.text().split(",") if x.strip()]
+            if not pvals:
+                raise ValueError("At least one percentile is required")
             if any(not 0 <= p <= 100 for p in pvals):
                 raise ValueError("Percentiles must be between 0 and 100")
         except ValueError as exc:
             raise ValueError(f"Invalid percentiles: {exc}")
-        start_month = int(self.month_combo.currentText()) if self.month_check.isChecked() else None
+        start_month = self.month_combo.currentData() if self.month_check.isChecked() else None
         cal_hours = (self.cal_start.value(), self.cal_end.value()) if self.cal_check.isChecked() else None
 
         return SimulationConfig(
@@ -1007,7 +1066,9 @@ class ConfigTab(QWidget):
             # Start month (default: None / unchecked)
             if data.get("start_month") is not None:
                 self.month_check.setChecked(True)
-                self.month_combo.setCurrentText(str(data["start_month"]))
+                idx = data["start_month"] - 1
+                if 0 <= idx < self.month_combo.count():
+                    self.month_combo.setCurrentIndex(idx)
             else:
                 self.month_check.setChecked(False)
 
@@ -1061,6 +1122,7 @@ class ConfigTab(QWidget):
                 "seed": config.seed,
             }
             if config.calendar_hours:
+                data["calendar_hours"] = list(config.calendar_hours)
                 data["calendar"] = ["custom", "UTC", f"{config.calendar_hours[0]}-{config.calendar_hours[1]}"]
             else:
                 data["calendar"] = ["all"]
@@ -1131,12 +1193,14 @@ class RunTab(QWidget):
         # Clean up previous worker if still running
         if self.worker is not None and self.worker.isRunning():
             self.worker.cancel()
-            self.worker.wait(3000)
+            self.worker.finished.disconnect()
+            self.worker.error.disconnect()
 
         self.log_area.clear()
         self.progress.setValue(0)
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
+        self._last_config = config  # cache for use in _on_finished
 
         n_tasks = len(config.tasks)
         total_h = sum(t.total_hours for t in config.tasks)
@@ -1176,7 +1240,7 @@ class RunTab(QWidget):
         self.mw.results_df = res_df
         self.mw.summary_df = summary_df
         self.mw.results_tab.load_results(res_df, summary_df)
-        self.mw.charts_tab.update_charts(res_df, self.mw.config_tab.build_config().pvals)
+        self.mw.charts_tab.update_charts(res_df, self._last_config.pvals)
         self.mw.unlock_after_simulation()
         self.mw.tabs.setCurrentWidget(self.mw.results_tab)
         self.mw.statusBar().showMessage("Simulation complete — Review results in Tab 4")
@@ -1310,23 +1374,37 @@ class ResultsTab(QWidget):
 
     def _export_csv(self):
         if self.mw.results_df is None:
+            QMessageBox.information(self, "Info", "시뮬레이션을 먼저 실행해주세요.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "results.csv", "CSV (*.csv)")
         if path:
-            self.mw.results_df.to_csv(path, index=False)
-            self.mw.statusBar().showMessage(f"CSV saved: {path}")
+            try:
+                self.mw.results_df.to_csv(path, index=False)
+                self.mw.statusBar().showMessage(f"CSV saved: {path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Export Error", f"CSV 저장 실패:\n{exc}")
 
     def _export_excel(self):
         if self.mw.results_df is None or self.mw.summary_df is None:
+            QMessageBox.information(self, "Info", "시뮬레이션을 먼저 실행해주세요.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save Excel", "report.xlsx", "Excel (*.xlsx)")
         if path:
-            tasks_data = [
-                {"name": t.name, "duration_h": t.duration_h, "thresholds": t.thresholds}
-                for t in self.mw.config_tab.task_table.get_tasks()
-            ]
-            generate_excel_report(self.mw.results_df, self.mw.summary_df, {"tasks": tasks_data}, path)
-            self.mw.statusBar().showMessage(f"Excel saved: {path}")
+            try:
+                tasks_data = [
+                    {"name": t.name, "duration_h": t.duration_h, "thresholds": t.thresholds,
+                     "setup_h": t.setup_h, "teardown_h": t.teardown_h}
+                    for t in self.mw.config_tab.task_table.get_tasks()
+                ]
+                ok = generate_excel_report(self.mw.results_df, self.mw.summary_df, {"tasks": tasks_data}, path)
+                if ok:
+                    self.mw.statusBar().showMessage(f"Excel saved: {path}")
+                else:
+                    QMessageBox.warning(self, "Warning",
+                        "openpyxl이 설치되어 있지 않아 Excel 저장이 불가합니다.\n"
+                        "pip install openpyxl 로 설치 후 다시 시도하세요.")
+            except Exception as exc:
+                QMessageBox.critical(self, "Export Error", f"Excel 저장 실패:\n{exc}")
 
 
 # =====================================================================
@@ -1426,9 +1504,9 @@ class ChartsTab(QWidget):
 
     def _draw_scatter(self, ax):
         ax.scatter(self._res["work_hours"] / 24, self._res["wait_hours"] / 24, alpha=0.5, s=20, color="steelblue")
-        ax.set_xlabel("Work (days)")
-        ax.set_ylabel("Wait (days)")
-        ax.set_title("Work vs. Wait Time")
+        ax.set_xlabel("Active Time incl. Setup/Teardown (days)")
+        ax.set_ylabel("Weather Wait (days)")
+        ax.set_title("Active vs. Wait Time")
         ax.grid(alpha=0.3)
         self.chart.refresh()
 
@@ -1503,11 +1581,16 @@ class OptimalMonthTab(QWidget):
         self.btn_run.setToolTip("Run simulation for each start month using current tasks and settings")
         self.btn_run.clicked.connect(self._run)
         btn_row.addWidget(self.btn_run)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 12)
-        btn_row.addWidget(self.progress)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._cancel)
+        btn_row.addWidget(self.btn_cancel)
         btn_row.addStretch()
         layout.addLayout(btn_row)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 12)
+        layout.addWidget(self.progress)
 
         self.result_label = QLabel("")
         self.result_label.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -1537,6 +1620,7 @@ class OptimalMonthTab(QWidget):
             return
 
         self.btn_run.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.progress.setValue(0)
 
         from pvalue.gui.workers import OptimalMonthWorker
@@ -1547,12 +1631,23 @@ class OptimalMonthTab(QWidget):
         self.worker.error.connect(self._on_error)
         self.worker.start()
 
+    def _cancel(self):
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.btn_run.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
+            self.progress.setValue(0)
+            self.result_label.setText("분석 취소됨")
+
     def _on_finished(self, result_df, optimal):
         self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         p90_min = result_df["P90_days"].min()
         p90_max = result_df["P90_days"].max()
+        _MNAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         self.result_label.setText(
-            f"Optimal start month: {optimal}  "
+            f"Optimal start month: {optimal} ({_MNAMES[optimal]})  "
             f"(P90 = {p90_min:.1f} days vs worst {p90_max:.1f} days)"
         )
 
@@ -1561,7 +1656,8 @@ class OptimalMonthTab(QWidget):
         self.table.setHorizontalHeaderLabels(["Month", "P90 (days)", "Mean (days)"])
         self.table.setRowCount(12)
         for i, (_, row) in enumerate(result_df.iterrows()):
-            self.table.setItem(i, 0, QTableWidgetItem(str(int(row["Month"]))))
+            m = int(row["Month"])
+            self.table.setItem(i, 0, QTableWidgetItem(f"{m} - {_MNAMES[m]}"))
             self.table.setItem(i, 1, QTableWidgetItem(f'{row["P90_days"]:.2f}'))
             self.table.setItem(i, 2, QTableWidgetItem(f'{row["Mean_days"]:.2f}'))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1584,4 +1680,5 @@ class OptimalMonthTab(QWidget):
 
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         QMessageBox.critical(self, "Error", msg)
