@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -101,11 +102,30 @@ class DataTab(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        # --- Shared: Data preview ---
+        # --- Shared: Data preview (with empty state) ---
+        self._stack = QStackedWidget()
+
+        # Page 0: empty state placeholder
+        empty = QLabel(
+            "<div style='text-align: center; padding: 60px; color: #9CA3AF;'>"
+            "<span style='font-size: 32px;'>📊</span><br><br>"
+            "<span style='font-size: 15px; font-weight: 600; color: #6B7280;'>"
+            "No Data Loaded</span><br><br>"
+            "<span style='font-size: 12px;'>"
+            "CSV 파일을 불러오거나 API에서 데이터를 가져오면<br>"
+            "이곳에 미리보기가 표시됩니다</span>"
+            "</div>"
+        )
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._stack.addWidget(empty)
+
+        # Page 1: actual preview table
         self.preview = QTableWidget()
         self.preview.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.preview.setAlternatingRowColors(True)
-        layout.addWidget(self.preview, stretch=1)
+        self._stack.addWidget(self.preview)
+
+        layout.addWidget(self._stack, stretch=1)
 
         self.preview_note = QLabel("")
         self.preview_note.setStyleSheet("color: #888; font-size: 11px; padding: 2px;")
@@ -149,8 +169,8 @@ class DataTab(QWidget):
                 parts.append(f"Wind {wind_nan:,}건({pct_wind:.1f}%)")
             status += (
                 f"<br><span style='color:#cc6600'>⚠ 결측 데이터: "
-                f"{', '.join(parts)} — 결측 구간은 시뮬레이션에서 작업 가능으로 처리됩니다 "
-                f"(NA handling: permissive)</span>"
+                f"{', '.join(parts)} — Tab 2 'Execution Mode'에서 NA 처리 방식 변경 가능 "
+                f"(Permissive: 작업 가능 / Conservative: 작업 불가)</span>"
             )
 
         self.status_label.setText(status)
@@ -161,6 +181,7 @@ class DataTab(QWidget):
         )
 
     def _show_preview(self, df: pd.DataFrame, max_rows=200):
+        self._stack.setCurrentIndex(1)  # switch from empty state to table
         cols = list(df.columns)
         self.preview.setColumnCount(len(cols) + 1)
         self.preview.setHorizontalHeaderLabels(["Timestamp"] + cols)
@@ -258,15 +279,22 @@ class _CsvSourceWidget(QWidget):
         opts.addWidget(btn_example)
         layout.addLayout(opts)
 
-        # CSV format help
-        help_label = QLabel(
-            "<b>General CSV example:</b><br>"
-            "<code>timestamp,Hs,Wind<br>"
-            "2020-01-01 00:00:00,1.2,8.5<br>"
-            "2020-01-01 01:00:00,1.3,9.1</code>"
+        # CSV format help (collapsible)
+        help_box = QGroupBox("CSV Format Guide")
+        help_box.setCheckable(True)
+        help_box.setChecked(False)
+        help_inner = QVBoxLayout(help_box)
+        self._help_content = QLabel(
+            "<pre style='font-family: Consolas, D2Coding, monospace; font-size: 12px; "
+            "padding: 8px;'>"
+            "timestamp,Hs,Wind\n"
+            "2020-01-01 00:00:00,1.2,8.5\n"
+            "2020-01-01 01:00:00,1.3,9.1</pre>"
         )
-        help_label.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
-        layout.addWidget(help_label)
+        self._help_content.setVisible(False)
+        help_inner.addWidget(self._help_content)
+        help_box.toggled.connect(self._help_content.setVisible)
+        layout.addWidget(help_box)
 
         self._toggle_hindcast(self.csv_type_combo.currentText())
 
@@ -873,12 +901,12 @@ class ConfigTab(QWidget):
         tg.addWidget(self.task_table)
         layout.addWidget(task_group, stretch=1)
 
-        # --- Simulation settings ---
-        sim_group = QGroupBox("Simulation Settings")
-        sg = QHBoxLayout(sim_group)
+        # --- Simulation settings (3-card layout) ---
+        cards_row = QHBoxLayout()
 
-        # Column 1
-        col1 = QVBoxLayout()
+        # Card 1: Monte Carlo
+        mc_card = QGroupBox("Monte Carlo")
+        col1 = QVBoxLayout(mc_card)
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("Simulations:"))
         self.n_sims_spin = QSpinBox()
@@ -917,10 +945,13 @@ class ConfigTab(QWidget):
         )
         r3.addWidget(self.seed_spin)
         col1.addLayout(r3)
-        sg.addLayout(col1)
+        col1.addStretch()
+        cards_row.addWidget(mc_card)
 
-        # Column 2
-        col2 = QVBoxLayout()
+        # Card 2: Execution Mode
+
+        mode_card = QGroupBox("Execution Mode")
+        col2 = QVBoxLayout(mode_card)
         self.radio_continuous = QRadioButton("Continuous mode")
         self.radio_continuous.setChecked(True)
         self.radio_continuous.setToolTip(
@@ -932,21 +963,21 @@ class ConfigTab(QWidget):
             "Work can be paused and resumed.\n"
             "Worked hours accumulate across multiple weather windows."
         )
-        # Explicit QButtonGroup to prevent cross-group interference
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self.radio_continuous)
         self._mode_group.addButton(self.radio_split)
         col2.addWidget(self.radio_continuous)
         col2.addWidget(self.radio_split)
 
-        col2.addSpacing(8)
-        self.radio_permissive = QRadioButton("Permissive NA (work OK)")
+        col2.addSpacing(12)
+        col2.addWidget(QLabel("<b>NA Handling</b>"))
+        self.radio_permissive = QRadioButton("Permissive (work OK)")
         self.radio_permissive.setChecked(True)
         self.radio_permissive.setToolTip(
             "Missing data (NA) is treated as 'work possible'.\n"
             "Use when data gaps are likely calm periods."
         )
-        self.radio_conservative = QRadioButton("Conservative NA (work blocked)")
+        self.radio_conservative = QRadioButton("Conservative (blocked)")
         self.radio_conservative.setToolTip(
             "Missing data (NA) is treated as 'work blocked'.\n"
             "Use for worst-case planning."
@@ -956,10 +987,12 @@ class ConfigTab(QWidget):
         self._na_group.addButton(self.radio_conservative)
         col2.addWidget(self.radio_permissive)
         col2.addWidget(self.radio_conservative)
-        sg.addLayout(col2)
+        col2.addStretch()
+        cards_row.addWidget(mode_card)
 
-        # Column 3
-        col3 = QVBoxLayout()
+        # Card 3: Schedule
+        sched_card = QGroupBox("Schedule")
+        col3 = QVBoxLayout(sched_card)
         month_row = QHBoxLayout()
         self.month_check = QCheckBox("Start month:")
         self.month_check.setToolTip(
@@ -1001,9 +1034,9 @@ class ConfigTab(QWidget):
         cal_row.addWidget(self.cal_end)
         col3.addLayout(cal_row)
         col3.addStretch()
-        sg.addLayout(col3)
+        cards_row.addWidget(sched_card)
 
-        layout.addWidget(sim_group)
+        layout.addLayout(cards_row)
 
     def build_config(self) -> SimulationConfig:
         """Build SimulationConfig from current widget state."""
@@ -1427,7 +1460,7 @@ class ChartsTab(QWidget):
         ctrl = QHBoxLayout()
         ctrl.addWidget(QLabel("Chart:"))
         self.chart_combo = QComboBox()
-        self.chart_combo.addItems(["Histogram + P-values", "CDF", "Work vs Wait Scatter", "Timeline (Top 5)"])
+        self.chart_combo.addItems(["Histogram + P-values", "CDF", "Wait Time & Efficiency", "Timeline (Top 5 + Best)"])
         self.chart_combo.setToolTip(
             "Histogram: Duration distribution with percentile lines\n"
             "CDF: Cumulative probability curve\n"
@@ -1473,9 +1506,10 @@ class ChartsTab(QWidget):
             self._draw_cdf(ax, days)
         elif idx == 2:
             self._draw_scatter(ax)
+            return  # manages its own axes
         elif idx == 3:
             self._draw_timeline()
-            return  # timeline manages its own axes
+            return  # manages its own axes
 
         self.chart.refresh()
 
@@ -1496,44 +1530,105 @@ class ChartsTab(QWidget):
         s = np.sort(days)
         cdf = np.arange(1, len(s) + 1) / len(s) * 100
         ax.plot(s, cdf, lw=2, color="navy")
+        # Add P-value horizontal/vertical reference lines
+        colors = {50: "royalblue", 75: "orange", 90: "crimson"}
+        for p in self._pvals:
+            val = np.percentile(days, p)
+            c = colors.get(p, "gray")
+            ax.axhline(p, color=c, lw=1, ls=":", alpha=0.5)
+            ax.axvline(val, color=c, lw=1.5, ls="--", alpha=0.7)
+            ax.plot(val, p, "o", color=c, ms=7, zorder=5)
+            ax.annotate(f"P{p}={val:.1f}d", (val, p), textcoords="offset points",
+                        xytext=(8, 4), fontsize=8, color=c, fontweight="bold")
         ax.set_xlabel("Campaign Duration (days)")
         ax.set_ylabel("Cumulative Probability (%)")
-        ax.set_title("CDF")
+        ax.set_title("CDF — Cumulative Distribution Function")
+        ax.set_ylim(0, 105)
         ax.grid(alpha=0.3)
         self.chart.refresh()
 
     def _draw_scatter(self, ax):
-        ax.scatter(self._res["work_hours"] / 24, self._res["wait_hours"] / 24, alpha=0.5, s=20, color="steelblue")
-        ax.set_xlabel("Active Time incl. Setup/Teardown (days)")
-        ax.set_ylabel("Weather Wait (days)")
-        ax.set_title("Active vs. Wait Time")
-        ax.grid(alpha=0.3)
+        # Dual chart: Wait Time histogram (left) + Efficiency gauge (right)
+        self.chart.figure.clear()
+        ax1, ax2 = self.chart.figure.subplots(1, 2, gridspec_kw={"width_ratios": [2, 1]})
+
+        wait_d = self._res["wait_hours"] / 24
+        work_d = self._res["work_hours"] / 24
+        elapsed_d = self._res["elapsed_days"]
+        efficiency = (work_d / elapsed_d * 100)
+
+        # Left: Wait time distribution
+        ax1.hist(wait_d, bins=30, alpha=0.7, color="#E86452", edgecolor="#C4443A")
+        mean_wait = wait_d.mean()
+        p90_wait = np.percentile(wait_d, 90)
+        ax1.axvline(mean_wait, color="#1F5B92", lw=2, ls="--",
+                    label=f"Mean = {mean_wait:.1f}d")
+        ax1.axvline(p90_wait, color="#E15759", lw=2, ls="--",
+                    label=f"P90 = {p90_wait:.1f}d")
+        ax1.set_xlabel("Weather Wait (days)")
+        ax1.set_ylabel("Frequency")
+        ax1.set_title("Weather Wait Distribution")
+        ax1.legend(fontsize=9)
+        ax1.grid(alpha=0.3)
+
+        # Right: Efficiency box + stats
+        bp = ax2.boxplot(efficiency, vert=True, widths=0.5,
+                         patch_artist=True,
+                         boxprops=dict(facecolor="#E8EEF4", edgecolor="#1F5B92"),
+                         medianprops=dict(color="#E15759", lw=2),
+                         whiskerprops=dict(color="#1F5B92"),
+                         capprops=dict(color="#1F5B92"))
+        mean_eff = efficiency.mean()
+        ax2.axhline(mean_eff, color="#1F5B92", lw=1.5, ls="--", alpha=0.7)
+        ax2.set_ylabel("Work Efficiency (%)")
+        ax2.set_title(f"Efficiency\nMean: {mean_eff:.1f}%")
+        ax2.set_xticks([])
+        ax2.set_ylim(0, 105)
+        ax2.grid(axis="y", alpha=0.3)
+
+        self.chart.figure.suptitle(
+            f"Wait Analysis — Work: {work_d.mean():.1f}d (fixed) | "
+            f"Wait: {mean_wait:.1f}d avg | Efficiency: {mean_eff:.0f}%",
+            fontsize=10, fontweight="bold", y=0.995)
+        self.chart.figure.tight_layout()
         self.chart.refresh()
 
     def _draw_timeline(self):
         self.chart.figure.clear()
-        samples = self._res.nlargest(5, "elapsed_days")
+        # Top 5 worst + Best 1
+        worst = self._res.nlargest(5, "elapsed_days")
+        best = self._res.nsmallest(1, "elapsed_days")
+        samples = pd.concat([worst, best])
         n = len(samples)
         axes = self.chart.figure.subplots(n, 1, sharex=True)
         if n == 1:
             axes = [axes]
+        max_days = samples["elapsed_days"].max()
         for i, (_, row) in enumerate(samples.iterrows()):
             ax = axes[i]
             wd = row["work_hours"] / 24
             wtd = row["wait_hours"] / 24
             td = row["elapsed_days"]
-            ax.barh(0, wd, color="seagreen", alpha=0.8, label="Work")
-            ax.barh(0, wtd, left=wd, color="tomato", alpha=0.8, label="Wait")
-            ax.text(wd / 2, 0, f"{wd:.1f}d", ha="center", va="center", fontsize=8, fontweight="bold")
-            ax.text(wd + wtd / 2, 0, f"{wtd:.1f}d", ha="center", va="center", fontsize=8, fontweight="bold")
+            is_best = i == n - 1
+            work_color = "#2D8B57" if not is_best else "#1B7A3D"
+            wait_color = "#E86452" if not is_best else "#C4443A"
+            ax.barh(0, wd, color=work_color, alpha=0.85, label="Work")
+            ax.barh(0, wtd, left=wd, color=wait_color, alpha=0.85, label="Wait")
+            if wd > max_days * 0.05:
+                ax.text(wd / 2, 0, f"{wd:.1f}d", ha="center", va="center", fontsize=8, fontweight="bold", color="white")
+            if wtd > max_days * 0.05:
+                ax.text(wd + wtd / 2, 0, f"{wtd:.1f}d", ha="center", va="center", fontsize=8, fontweight="bold", color="white")
             ax.set_yticks([])
-            ax.set_xlim(0, td * 1.05)
-            ax.set_title(f'Sim #{int(row["sim"]) + 1} — {td:.1f}d', fontsize=9, loc="left")
+            ax.set_xlim(0, max_days * 1.05)
+            tag = "BEST" if is_best else f"#{i+1}"
+            prefix = "\u2605 " if is_best else ""
+            ax.set_title(f'{prefix}{tag} — Sim #{int(row["sim"]) + 1} — {td:.1f}d', fontsize=9, loc="left",
+                         color="#1B7A3D" if is_best else "#333")
             if i == 0:
                 ax.legend(fontsize=8, loc="upper right")
             ax.grid(axis="x", alpha=0.3)
         axes[-1].set_xlabel("Duration (days)")
-        self.chart.figure.suptitle("Work / Wait Timeline (Top 5)", fontweight="bold", y=0.995)
+        self.chart.figure.suptitle("Work / Wait Timeline (Top 5 Worst + Best)", fontweight="bold", y=0.995)
         self.chart.figure.tight_layout()
         self.chart.refresh()
 

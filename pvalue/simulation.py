@@ -46,7 +46,23 @@ def find_next_window(
             start_run = None
         i = (i + 1) % n
 
-    raise RuntimeError("No feasible continuous window found")
+    # Provide actionable guidance
+    max_run = 0
+    run_len = 0
+    for idx in range(n):
+        if mask[idx]:
+            run_len += 1
+            max_run = max(max_run, run_len)
+        else:
+            run_len = 0
+    raise RuntimeError(
+        f"No feasible continuous window found.\n"
+        f"필요: {need_steps} 연속 스텝, 데이터 내 최대 연속 가용: {max_run} 스텝.\n"
+        f"해결 방법:\n"
+        f"  - Split (accumulated) mode 사용\n"
+        f"  - Business hours 설정 해제 (연속 모드에서 일일 제한이 윈도우를 차단)\n"
+        f"  - 임계값(Hs/Wind) 완화 또는 작업 시간 단축"
+    )
 
 
 def find_window_accumulated(
